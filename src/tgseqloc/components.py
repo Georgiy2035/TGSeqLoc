@@ -1,0 +1,45 @@
+"""Registration of the component implementations shipped with the MVP."""
+
+from __future__ import annotations
+
+from tgseqloc.data.v4rl import parse_paddleocr, parse_scene_graph
+from tgseqloc.evaluation import RecallAtK, Retriever
+from tgseqloc.models import GATGraphEncoder
+from tgseqloc.preparation import FrozenTextEncoder, build_fused_graph, process_v4rl
+from tgseqloc.registry import Registry, registry
+from tgseqloc.training import mine_hard_negatives
+
+
+def confidence_filter(sample: dict, threshold: float = 0.0) -> bool:
+    """Return whether an OCR prediction passes the configured confidence."""
+
+    return float(sample.get("confidence", sample.get("score", 0.0))) >= threshold
+
+
+def register_builtin_components(target: Registry = registry) -> Registry:
+    """Register all runnable MVP implementations once and return the registry."""
+
+    entries = (
+        ("source", "precomputed_paddleocr", parse_paddleocr),
+        ("source", "external_json", parse_scene_graph),
+        ("filter", "confidence", confidence_filter),
+        ("encoder", "multilingual_e5", FrozenTextEncoder),
+        ("fusion", "text_nodes", build_fused_graph),
+        ("graph_encoder", "gat", GATGraphEncoder),
+        ("dataset", "v4rl", process_v4rl),
+        ("miner", "hard_negative", mine_hard_negatives),
+        ("retriever", "faiss_cosine", Retriever),
+        ("metric", "recall_at_k", RecallAtK),
+    )
+    for kind, name, factory in entries:
+        if not target.contains(kind, name):
+            target.add(kind, name, factory)
+    return target
+
+
+def component_map(target: Registry = registry) -> dict[str, list[str]]:
+    """Return available implementation names grouped by extension point."""
+
+    register_builtin_components(target)
+    return {kind: list(target.available(kind)) for kind in sorted(target.KINDS)}
+

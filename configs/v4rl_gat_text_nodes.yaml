@@ -1,0 +1,82 @@
+# Полный пример AppConfig. Пути считаются от каталога запуска.
+dataset:
+  adapter: v4rl                        # Единственный текущий dataset registry/config name.
+  root: data/V4RL                     # Содержит {sequence}_frames.
+  sequences: [seq1, seq2]             # Непустые уникальные имена.
+  ocr_root_template: data/ocr/{sequence}/chunk_{chunk}
+  scene_graph_root_template: data/scene_graphs/{sequence}
+  gt_path: data/V4RL/gt/gt_shop_street_1.txt
+  prepared_root: data/prepared         # Итоговый root: data/prepared/v4rl.
+  reference_sequence: seq1             # База для retrieval; должна быть в sequences.
+  query_sequence: seq2                 # Запросы; отличается от reference_sequence.
+  test_ratio: 0.2                      # Временной хвост query-последовательности.
+  validation_ratio: 0.1                # Доля размеченной pre-test части.
+  interpolate_gt: false                # true переносит ближайшую keyframe-разметку.
+  chunk_size: 200                      # chunk, local = divmod(frame_index, chunk_size).
+
+sources:
+  ocr: precomputed_paddleocr           # PaddleOCR JSON уже рассчитан вне TGSeqLoc.
+  scene_graph: external_json           # Node-link scene graph уже рассчитан извне.
+
+preprocess:
+  text_filter: confidence              # Имя зарегистрированного фильтра.
+  text_encoder_backend: multilingual_e5 # Registry factory замороженного encoder.
+  text_encoder: intfloat/multilingual-e5-small
+  revision: null                       # HF revision/commit; зафиксируйте для воспроизводимости.
+  fusion: text_nodes
+  connection_strategy: overlap_nearest # overlap_nearest|overlap|nearest|fully_connected.
+  connection_k: 1                      # Используется стратегией nearest.
+  ocr_confidence_threshold: 0.0        # Допустимый диапазон [0, 1].
+  encoder_batch_size: 128              # Строк в одном вызове E5.
+  frame_batch_size: 256                # Кадров в preparation batch.
+  gt_tolerance_ns: 50000000            # Максимальная ошибка привязки GT timestamp.
+
+cache:
+  policy: reuse_if_compatible           # reuse_if_compatible|require_existing|rebuild.
+
+model:
+  graph_encoder: gat
+  in_dim: 4                             # [cx, cy, width, height].
+  hidden_dim: 256
+  n_layers: 2
+  proj_dim: 256                         # Размер итогового place descriptor.
+  node_emb_dim: 64
+  edge_emb_dim: 64
+  edge_cont_dim: 10                     # Должен совпадать с подготовленной схемой.
+  text_emb_dim: 384                     # Для multilingual-e5-small.
+  dropout: 0.1
+  heads: 4
+  use_text_nodes: true
+  use_edge_geometry: true
+
+training:
+  epochs: 1                             # Быстрый smoke run; увеличьте для эксперимента.
+  patience: 0                           # Для одного epoch early stopping несущественен.
+  batch_size: 16                        # Число query-triplet групп.
+  infer_batch_size: 128
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  margin: 0.3
+  negatives_per_query: 2
+  hard_search_depth: 256
+  max_grad_norm: 5.0
+  miner: hard_negative                   # Registry implementation для каждого epoch.
+  recall_values: [1, 5, 10]             # Validation Recall@K.
+  early_stopping_metric: R@5            # Обязано входить в recall_values.
+  resume_from: null                     # Путь к совместимому training checkpoint.
+
+retrieval:
+  retriever: faiss_cosine
+  metric: recall_at_k
+  recall_values: [1, 5, 10]             # Recall@K финального test.
+  reranker: null                        # Реализованных reranker сейчас нет.
+  top_k: 20
+
+runtime:
+  device: auto                          # auto|cpu|cuda; произвольная torch device строка.
+  seed: 42
+  num_workers: 4
+
+output:
+  root: outputs
+  experiment_name: v4rl-gat-text-nodes
