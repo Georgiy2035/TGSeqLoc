@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 
 import torch
 
+from tgseqloc.data.formats import FrameText
 from tgseqloc.data.schema import (
     EDGE_FEATURE_DIM,
     NODE_FEATURE_DIM,
@@ -386,7 +387,7 @@ def process_v4rl(
     *,
     encoder: TextEncoder | None = None,
     text_encoder_factory: Callable[..., TextEncoder] = FrozenTextEncoder,
-    ocr_parser: Callable[..., tuple[list[list[float]], list[str]]] = parse_paddleocr,
+    ocr_parser: Callable[..., FrameText] = parse_paddleocr,
     scene_graph_parser: Callable[..., tuple[list[dict[str, Any]], list[tuple[int, int, str]], int]] = parse_scene_graph,
     text_filter: Callable[[Mapping[str, Any], float], bool] | None = None,
     fusion_builder: Callable[..., Any] = build_fused_graph,
@@ -519,16 +520,20 @@ def process_v4rl(
             object_nodes, scene_edges, dropped = scene_graph_parser(
                 record.graph_path, class_to_idx
             )
-            boxes, texts = ocr_parser(
+            frame_text = ocr_parser(
                 record.ocr_path,
                 float(_get(config, "ocr_confidence_threshold", 0.0)),
                 noop_texts=_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS),
                 prediction_filter=text_filter,
             )
+            texts = frame_text.texts
             text_start = len(flat_texts)
             flat_texts.extend(texts)
             pending.append(
-                (record, output_path, object_nodes, scene_edges, dropped, boxes, texts, text_start)
+                (
+                    record, output_path, object_nodes, scene_edges, dropped,
+                    frame_text.boxes, texts, text_start,
+                )
             )
         encoded = validate_embeddings(
             text_encoder, flat_texts, text_encoder.encode(flat_texts)

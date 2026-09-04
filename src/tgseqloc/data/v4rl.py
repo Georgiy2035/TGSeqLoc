@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .formats import FrameText, TextDetection
 from .schema import FrameRecord
 
 FRAME_RE = re.compile(r"^(?P<index>\d{6})_(?P<timestamp>\d{19})\.(?:png|jpg|jpeg)$", re.I)
@@ -99,8 +100,8 @@ def parse_paddleocr(
     *,
     noop_texts: Iterable[str] = DEFAULT_NOOP_TEXTS,
     prediction_filter: Callable[[Mapping[str, Any], float], bool] | None = None,
-) -> tuple[list[list[float]], list[str]]:
-    """Parse PaddleOCR JSON into normalized xyxy boxes and useful strings."""
+) -> FrameText:
+    """Parse precomputed PaddleOCR JSON into the canonical frame format."""
 
     data = load_json(path)
     width = float(data.get("image_width", data.get("width", 0)))
@@ -108,8 +109,7 @@ def parse_paddleocr(
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid OCR image dimensions in {path}")
     noops = {str(value).strip().casefold() for value in noop_texts}
-    boxes: list[list[float]] = []
-    texts: list[str] = []
+    detections: list[TextDetection] = []
     for row in _prediction_rows(data):
         confidence = float(row.get("confidence", row.get("score", 0.0)))
         if prediction_filter is not None:
@@ -141,9 +141,16 @@ def parse_paddleocr(
             min(1.0, max(0.0, y2 / height)),
         ]
         if normalized[2] > normalized[0] and normalized[3] > normalized[1]:
-            boxes.append(normalized)
-            texts.append(text)
-    return boxes, texts
+            detections.append(
+                TextDetection(
+                    box=tuple(normalized), text=text, confidence=confidence
+                )
+            )
+    return FrameText(
+        detections=tuple(detections),
+        image_size=(int(width), int(height)),
+        model_identity={"backend": "precomputed_paddleocr", "source": str(path)},
+    )
 
 
 def parse_scene_graph(

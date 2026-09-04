@@ -91,5 +91,10 @@ tgseqloc = "tgseqloc.cli:app"
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -73,9 +73,13 @@ class V4RLSourceTests(unittest.TestCase):
 
     def test_ocr_and_scene_graph_parsing_filters_and_normalizes(self) -> None:
         record = self.discover()[0]
-        boxes, texts = parse_paddleocr(record.ocr_path, 0.5)
-        self.assertEqual(texts, ["shop 0"])
-        self.assertEqual(boxes, [[0.1, 0.1, 0.4, 0.4]])
+        frame_text = parse_paddleocr(record.ocr_path, 0.5)
+        self.assertEqual(frame_text.texts, ["shop 0"])
+        self.assertEqual(frame_text.boxes, [[0.1, 0.1, 0.4, 0.4]])
+        # Confidence used to be discarded by the parser; the dynamics stage
+        # needs it to survive all the way to the graph.
+        self.assertEqual([d.confidence for d in frame_text.detections], [0.95])
+        self.assertIsNone(frame_text.detections[0].dynamic_score)
 
         nodes, edges, dropped = parse_scene_graph(
             record.graph_path, {"unknown": 0, "building": 1}
