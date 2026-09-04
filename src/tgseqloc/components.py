@@ -5,6 +5,7 @@ from __future__ import annotations
 from tgseqloc.data.v4rl import parse_paddleocr, parse_scene_graph
 from tgseqloc.evaluation import RecallAtK, Retriever
 from tgseqloc.inference.ocr import build_paddleocr_v5
+from tgseqloc.inference.segmentation import build_yolo_seg
 from tgseqloc.models import GATGraphEncoder
 from tgseqloc.preparation import FrozenTextEncoder, build_fused_graph, process_v4rl
 from tgseqloc.registry import Registry, registry
@@ -26,6 +27,7 @@ def register_builtin_components(target: Registry = registry) -> Registry:
         # Same models as the precomputed source above, run here instead of read
         # from JSON another tool produced.
         ("ocr", "paddleocr_v5", build_paddleocr_v5),
+        ("segmenter", "yolo_seg", build_yolo_seg),
         ("filter", "confidence", confidence_filter),
         ("encoder", "multilingual_e5", FrozenTextEncoder),
         ("fusion", "text_nodes", build_fused_graph),

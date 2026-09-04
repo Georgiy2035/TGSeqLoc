@@ -231,15 +231,43 @@ def diagnose(
     report.run("text encoder model", check_encoder_model)
 
     def check_device() -> tuple[str, str, str | None]:
+        """Verify the device by running on it, not by asking whether it exists.
+
+        ``torch.cuda.is_available()`` answers yes for a GPU whose architecture
+        the installed build has no kernels for; the failure then surfaces deep
+        inside the first real operation. A one-element matmul settles it here.
+        """
+
         import torch
 
         requested = config.runtime.device
-        available = torch.cuda.is_available()
-        if requested == "auto":
-            return OK, f"auto resolves to {'cuda' if available else 'cpu'}", None
-        if requested.startswith("cuda") and not available:
+        wants_cuda = requested == "auto" or requested.startswith("cuda")
+        if not wants_cuda:
+            return OK, f"{requested} is usable", None
+        if not torch.cuda.is_available():
+            if requested == "auto":
+                return OK, "auto resolves to cpu; no CUDA device", None
             return ERROR, f"{requested} requested but CUDA is unavailable", "runtime.device: cpu"
-        return OK, f"{requested} is usable", None
+
+        target = "cuda" if requested == "auto" else requested
+        name = torch.cuda.get_device_name(0)
+        try:
+            probe = torch.zeros((2, 2), device=target)
+            torch.mm(probe, probe).cpu()
+        except RuntimeError as error:
+            detail = (
+                f"{name} is present but unusable with torch {torch.__version__}: "
+                f"{str(error).splitlines()[0]}"
+            )
+            supported = ", ".join(torch.cuda.get_arch_list()) or "none"
+            if requested == "auto":
+                return WARN, f"{detail}; auto will fall back to cpu. Built for: {supported}", (
+                    "install a torch build for this GPU architecture"
+                )
+            return ERROR, f"{detail}. Built for: {supported}", (
+                "install a torch build for this GPU architecture, or set runtime.device: cpu"
+            )
+        return OK, f"{target} works ({name})", None
 
     report.run("device", check_device)
 
