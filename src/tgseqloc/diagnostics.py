@@ -197,7 +197,9 @@ def diagnose(
                     f"add {logical} to {manifest}",
                 )
             status: WeightStatus = check(spec, verify_hash=verify_hashes)
-            return (OK if status.ok else ERROR), f"{section}: {status.detail}", status.fix
+            # A weight the library fetches itself only delays the first run.
+            level = OK if status.ok else (WARN if status.auto_fetch else ERROR)
+            return level, f"{section}: {status.detail}", status.fix
 
         report.run(f"weights: {logical}", check_weight)
 

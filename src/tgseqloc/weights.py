@@ -38,6 +38,8 @@ class WeightSpec:
     size_bytes: int | None = None
     repo_id: str | None = None
     revision: str | None = None
+    models: tuple[str, ...] = ()
+    cache_dir: Path | None = None
     note: str = ""
 
     @property
@@ -53,6 +55,10 @@ class WeightStatus:
     ok: bool
     detail: str
     fix: str | None = None
+    auto_fetch: bool = False
+    """True when the library downloads this itself on first use. Such a weight
+    being absent delays a run rather than breaking it, so callers report it as a
+    warning instead of an error."""
 
 
 def _as_path(root: Path, value: Any, name: str) -> Path:
@@ -89,14 +95,19 @@ def load_manifest(
         if not isinstance(payload, Mapping):
             raise WeightError(f"{manifest_path}: entry {name!r} must be a mapping")
         kind = str(payload.get("kind", "")).strip()
-        if kind not in ("file", "huggingface"):
+        if kind not in ("file", "huggingface", "paddlex"):
             raise WeightError(
                 f"{manifest_path}: entry {name!r} has unsupported kind {kind!r}; "
-                "use 'file' or 'huggingface'"
+                "use 'file', 'huggingface' or 'paddlex'"
             )
         if kind == "file":
             if not payload.get("path"):
                 raise WeightError(f"{manifest_path}: file entry {name!r} needs a path")
+        elif kind == "paddlex":
+            if not payload.get("models"):
+                raise WeightError(
+                    f"{manifest_path}: paddlex entry {name!r} needs a models list"
+                )
         elif not payload.get("repo_id"):
             raise WeightError(
                 f"{manifest_path}: huggingface entry {name!r} needs a repo_id"
@@ -104,6 +115,12 @@ def load_manifest(
         specs[str(name)] = WeightSpec(
             name=str(name),
             kind=kind,
+            models=tuple(str(model) for model in payload.get("models", ())),
+            cache_dir=(
+                Path(str(payload["cache_dir"])).expanduser()
+                if payload.get("cache_dir")
+                else None
+            ),
             path=_as_path(base, payload["path"], str(name)) if kind == "file" else None,
             url=payload.get("url"),
             sha256=(str(payload["sha256"]).lower() if payload.get("sha256") else None),
@@ -132,7 +149,32 @@ def check(spec: WeightSpec, *, verify_hash: bool = False) -> WeightStatus:
 
     if spec.is_file:
         return _check_file(spec, verify_hash=verify_hash)
+    if spec.kind == "paddlex":
+        return _check_paddlex(spec)
     return _check_huggingface(spec)
+
+
+PADDLEX_CACHE = Path("~/.paddlex/official_models").expanduser()
+
+
+def _check_paddlex(spec: WeightSpec) -> WeightStatus:
+    """Report which PaddleOCR models are already in the PaddleX cache.
+
+    PaddleOCR downloads what it needs on first use, so absence delays the first
+    run rather than breaking it.
+    """
+
+    cache = spec.cache_dir or PADDLEX_CACHE
+    missing = [model for model in spec.models if not (cache / model).is_dir()]
+    if missing:
+        return WeightStatus(
+            spec.name,
+            False,
+            f"PaddleOCR will download on first use: {', '.join(missing)} (cache {cache})",
+            None,
+            auto_fetch=True,
+        )
+    return WeightStatus(spec.name, True, f"{len(spec.models)} models in {cache}")
 
 
 def _check_file(spec: WeightSpec, *, verify_hash: bool) -> WeightStatus:
@@ -182,8 +224,9 @@ def _check_huggingface(spec: WeightSpec) -> WeightStatus:
             False,
             f"not in the local cache: {spec.repo_id}"
             + (f"@{spec.revision}" if spec.revision else "")
-            + f" ({type(error).__name__})",
+            + "; will be downloaded on first use",
             fix,
+            auto_fetch=True,
         )
     return WeightStatus(spec.name, True, f"cached: {location}")
 

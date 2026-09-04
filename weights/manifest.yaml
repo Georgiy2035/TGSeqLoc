@@ -6,9 +6,23 @@
 #
 # kind: file        — одиночный файл; нужен path, желательно sha256 и size_bytes.
 # kind: huggingface — снапшот репозитория; нужен repo_id, желательно revision.
+# kind: paddlex     — модели, которые PaddleOCR тянет в свой кэш сам; нужен
+#                     список models. Их отсутствие откладывает первый запуск,
+#                     но не ломает его, поэтому doctor даёт предупреждение.
 version: 1
 
 weights:
+  paddleocr_v5_eslav:
+    kind: paddlex
+    models:
+      - PP-OCRv5_server_det
+      - eslav_PP-OCRv5_mobile_rec
+      - PP-LCNet_x1_0_textline_ori
+    note: >-
+      Выбранная OCR-модель пайплайна. Распознаватель eslav покрывает латиницу и
+      кириллицу; другие письменности (каннада, тайский, японский) он читает как
+      мусор, а не пропускает — под них нужен другой распознаватель.
+
   yolo11x_seg:
     kind: file
     path: weights/segmentation/yolo11x-seg.pt
