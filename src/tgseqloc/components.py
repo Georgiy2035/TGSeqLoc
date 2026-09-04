@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tgseqloc.data.v4rl import parse_paddleocr, parse_scene_graph
 from tgseqloc.evaluation import RecallAtK, Retriever
+from tgseqloc.inference.dynamics import build_mask_ioa
 from tgseqloc.inference.ocr import build_paddleocr_v5
 from tgseqloc.inference.segmentation import build_yolo_seg
 from tgseqloc.models import GATGraphEncoder
@@ -28,6 +29,7 @@ def register_builtin_components(target: Registry = registry) -> Registry:
         # from JSON another tool produced.
         ("ocr", "paddleocr_v5", build_paddleocr_v5),
         ("segmenter", "yolo_seg", build_yolo_seg),
+        ("text_dynamics", "mask_ioa", build_mask_ioa),
         ("filter", "confidence", confidence_filter),
         ("encoder", "multilingual_e5", FrozenTextEncoder),
         ("fusion", "text_nodes", build_fused_graph),
