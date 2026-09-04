@@ -1,0 +1,32 @@
+# Реестр весов: логическое имя -> откуда взять и как опознать.
+#
+# Конфигурации ссылаются на логические имена, а не на пути, поэтому эксперимент
+# переносится на другую машину без правок. Файлы сюда не коммитятся — их
+# докачивает `tgseqloc weights sync`, а `tgseqloc doctor` проверяет наличие.
+#
+# kind: file        — одиночный файл; нужен path, желательно sha256 и size_bytes.
+# kind: huggingface — снапшот репозитория; нужен repo_id, желательно revision.
+version: 1
+
+weights:
+  yolo11x_seg:
+    kind: file
+    path: weights/segmentation/yolo11x-seg.pt
+    url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x-seg.pt
+    sha256: 4e53a5f5fd3ee2ae3361c62169c6bb3ed4ae251dd0e57606e230955aa52d919c
+    size_bytes: 125090821
+    note: Сегментация динамических объектов; выбранная модель пайплайна.
+
+  yolo11m_seg:
+    kind: file
+    path: weights/segmentation/yolo11m-seg.pt
+    url: https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m-seg.pt
+    size_bytes: 45400152
+    note: Более лёгкая альтернатива yolo11x_seg.
+
+  e5_small:
+    kind: huggingface
+    repo_id: intfloat/multilingual-e5-small
+    note: >-
+      Замороженный текстовый энкодер по умолчанию. revision не зафиксирован;
+      задайте его здесь и в preprocess.revision для воспроизводимости.

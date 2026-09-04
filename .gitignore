@@ -5,3 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+
+# Веса скачиваются по манифесту, в git не хранятся.
+weights/**
+!weights/manifest.yaml

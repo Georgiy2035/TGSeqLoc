@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,7 +11,9 @@ import typer
 
 from tgseqloc.components import component_map
 from tgseqloc.config import load_config
+from tgseqloc.diagnostics import default_manifest_path, diagnose, format_report
 from tgseqloc.pipeline import PipelineRunner
+from tgseqloc.weights import WeightError, check, fetch, load_manifest
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -79,6 +82,83 @@ def run(
     """Run preparation, training, and evaluation."""
 
     _execute(config, lambda runner: runner.run())
+
+
+@app.command()
+def doctor(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    check_inputs: bool = typer.Option(True, help="Also check dataset inputs on disk."),
+    verify_hashes: bool = typer.Option(
+        False, help="Also hash weight files; slower but detects corruption."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit the report as JSON."),
+) -> None:
+    """Check configuration, components, inputs, weights and device in one pass.
+
+    Reports every problem it finds instead of stopping at the first, then exits
+    non-zero if any of them is fatal.
+    """
+
+    try:
+        loaded = load_config(config)
+    except (OSError, ValueError) as exc:
+        raise typer.ClickException(f"configuration is unusable: {exc}") from exc
+
+    report = diagnose(loaded, check_inputs=check_inputs, verify_hashes=verify_hashes)
+    if as_json:
+        _print(report.to_dict())
+    else:
+        typer.echo(format_report(report))
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+weights_app = typer.Typer(no_args_is_help=True, help="Inspect and fetch model weights.")
+app.add_typer(weights_app, name="weights")
+
+
+@weights_app.command("list")
+def weights_list(
+    verify_hashes: bool = typer.Option(False, help="Hash present files as well."),
+) -> None:
+    """Show every manifest entry and whether it is available locally."""
+
+    manifest = default_manifest_path()
+    specs = load_manifest(manifest)
+    _print(
+        {
+            name: {"kind": spec.kind, **asdict(check(spec, verify_hash=verify_hashes))}
+            for name, spec in sorted(specs.items())
+        }
+    )
+
+
+@weights_app.command("sync")
+def weights_sync(
+    name: list[str] = typer.Option(
+        None, "--name", help="Fetch only these entries; default is everything missing."
+    ),
+) -> None:
+    """Download manifest entries that are missing locally."""
+
+    specs = load_manifest(default_manifest_path())
+    unknown = sorted(set(name or ()) - set(specs))
+    if unknown:
+        raise typer.ClickException(f"not in the manifest: {', '.join(unknown)}")
+    selected = [specs[key] for key in (name or sorted(specs))]
+
+    fetched: dict[str, str] = {}
+    for spec in selected:
+        status = check(spec)
+        if status.ok:
+            fetched[spec.name] = "already present"
+            continue
+        typer.echo(f"fetching {spec.name} ...", err=True)
+        try:
+            fetched[spec.name] = str(fetch(spec))
+        except WeightError as exc:
+            raise typer.ClickException(str(exc)) from exc
+    _print(fetched)
 
 
 @app.command("components")
