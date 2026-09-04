@@ -9,7 +9,6 @@ from typing import Any
 
 from tgseqloc.components import component_map, register_builtin_components
 from tgseqloc.config import AppConfig
-from tgseqloc.data.v4rl import discover_v4rl_records
 from tgseqloc.registry import registry
 from tgseqloc.training import Trainer
 
@@ -70,18 +69,16 @@ class PipelineRunner:
             "prepared_data_root": str(self.prepared_data_root),
         }
         if check_inputs:
-            records = discover_v4rl_records(
-                self.config.dataset.root,
-                self.config.dataset.ocr_root_template,
-                self.config.dataset.scene_graph_root_template,
-                self.config.dataset.sequences,
-                chunk_size=self.config.dataset.chunk_size,
-            )
-            if not self.config.dataset.gt_path.is_file():
-                raise FileNotFoundError(
-                    f"Missing V4RL ground truth: {self.config.dataset.gt_path}"
+            # Input discovery belongs to the dataset adapter: the orchestrator
+            # must not know how any particular dataset is laid out on disk.
+            adapter = registry.get("dataset", self.config.dataset.adapter)
+            discover = getattr(adapter, "discover_inputs", None)
+            if discover is None:
+                raise RuntimeError(
+                    f"dataset adapter {self.config.dataset.adapter!r} does not expose "
+                    "discover_inputs; run with check_inputs disabled or implement it"
                 )
-            result["source_frame_count"] = len(records)
+            result["source_frame_count"] = discover(self.config)
         return result
 
     def prepare(self, **kwargs: Any) -> dict[str, Any]:

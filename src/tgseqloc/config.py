@@ -15,11 +15,6 @@ class ConfigError(ValueError):
     """Raised when configuration is unknown, ill-typed, or inconsistent."""
 
 
-DATASET_ADAPTERS = ("v4rl",)
-OCR_SOURCES = ("precomputed_paddleocr",)
-SCENE_GRAPH_SOURCES = ("external_json",)
-TEXT_FILTERS = ("confidence",)
-FUSION_METHODS = ("text_nodes",)
 CONNECTION_STRATEGIES = (
     "overlap_nearest",
     "overlap",
@@ -27,9 +22,20 @@ CONNECTION_STRATEGIES = (
     "fully_connected",
 )
 CACHE_POLICIES = ("reuse_if_compatible", "require_existing", "rebuild")
-GRAPH_ENCODERS = ("gat",)
-RETRIEVERS = ("faiss_cosine",)
-RERANKERS: tuple[str, ...] = ()
+
+
+def _registered(kind: str) -> tuple[str, ...]:
+    """Return the implementations registered for ``kind``.
+
+    Allowed values come from the registry rather than a hand-maintained tuple,
+    so registering a component is the only step needed to make it selectable.
+    The import is local because the registry pulls in torch, and configuration
+    has to stay cheap to import.
+    """
+
+    from tgseqloc.components import register_builtin_components
+
+    return register_builtin_components().available(kind)
 
 
 @dataclass(slots=True)
@@ -78,6 +84,35 @@ class PreprocessConfig:
     encoder_batch_size: int = 128
     frame_batch_size: int = 256
     gt_tolerance_ns: int = 50_000_000
+
+
+@dataclass(slots=True)
+class ComponentConfig:
+    """One swappable stage: which implementation, its weights, its parameters.
+
+    ``params`` is deliberately untyped here. A stage's parameters belong to the
+    implementation that consumes them, so keeping them out of ``AppConfig``
+    stops the shared sections from accumulating a field per model ever added.
+    ``weights`` names an entry in the weight manifest rather than a filesystem
+    path, so a configuration stays portable between machines.
+    """
+
+    backend: str | None = None
+    weights: str | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.backend)
+
+    def validate(self, path: str, kind: str) -> None:
+        if self.backend is None:
+            if self.weights is not None:
+                raise ConfigError(f"{path}.weights is set while {path}.backend is null")
+            return
+        if not self.backend.strip():
+            raise ConfigError(f"{path}.backend cannot be empty; use null to disable")
+        _choice(f"{path}.backend", self.backend, _registered(kind))
 
 
 @dataclass(slots=True)
@@ -163,6 +198,13 @@ class AppConfig:
 
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
+    segmentation: ComponentConfig = field(default_factory=ComponentConfig)
+    """Dynamic-object segmentation. Disabled (``backend: null``) until a
+    segmenter is registered; with it disabled the dynamics stage is skipped and
+    every detection reaches the graph."""
+    text_dynamics: ComponentConfig = field(default_factory=ComponentConfig)
+    """Scores how much of each detection sits on a dynamic object. Requires
+    ``segmentation`` to be enabled."""
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -174,34 +216,42 @@ class AppConfig:
     def validate(self) -> AppConfig:
         """Validate implemented names, ranges, and cross-field constraints."""
 
-        _choice("dataset.adapter", self.dataset.adapter, DATASET_ADAPTERS)
-        _choice("sources.ocr", self.sources.ocr, OCR_SOURCES)
-        _choice(
-            "sources.scene_graph", self.sources.scene_graph, SCENE_GRAPH_SOURCES
-        )
-        _choice(
-            "preprocess.text_filter", self.preprocess.text_filter, TEXT_FILTERS
-        )
+        _choice("dataset.adapter", self.dataset.adapter, _registered("dataset"))
+        _choice("sources.ocr", self.sources.ocr, _registered("source"))
+        _choice("sources.scene_graph", self.sources.scene_graph, _registered("source"))
+        _choice("preprocess.text_filter", self.preprocess.text_filter, _registered("filter"))
         _choice(
             "preprocess.text_encoder_backend",
             self.preprocess.text_encoder_backend,
-            ("multilingual_e5",),
+            _registered("encoder"),
         )
-        _choice("preprocess.fusion", self.preprocess.fusion, FUSION_METHODS)
+        _choice("preprocess.fusion", self.preprocess.fusion, _registered("fusion"))
         _choice(
             "preprocess.connection_strategy",
             self.preprocess.connection_strategy,
             CONNECTION_STRATEGIES,
         )
         _choice("cache.policy", self.cache.policy, CACHE_POLICIES)
-        _choice("model.graph_encoder", self.model.graph_encoder, GRAPH_ENCODERS)
         _choice(
-            "retrieval.retriever", self.retrieval.retriever, RETRIEVERS
+            "model.graph_encoder", self.model.graph_encoder, _registered("graph_encoder")
         )
-        _choice("training.miner", self.training.miner, ("hard_negative",))
-        _choice("retrieval.metric", self.retrieval.metric, ("recall_at_k",))
+        _choice("retrieval.retriever", self.retrieval.retriever, _registered("retriever"))
+        _choice("training.miner", self.training.miner, _registered("miner"))
+        _choice("retrieval.metric", self.retrieval.metric, _registered("metric"))
         if self.retrieval.reranker is not None:
-            _choice("retrieval.reranker", self.retrieval.reranker, RERANKERS)
+            _choice(
+                "retrieval.reranker", self.retrieval.reranker, _registered("reranker")
+            )
+        # The dependency is checked before the backend names: telling the user
+        # that dynamics needs segmentation is more useful than telling them the
+        # backend is unknown, which is what they would see otherwise.
+        if self.text_dynamics.enabled and not self.segmentation.enabled:
+            raise ConfigError(
+                "text_dynamics.backend requires segmentation.backend: scoring text "
+                "against dynamic objects needs masks to score against"
+            )
+        self.segmentation.validate("segmentation", "segmenter")
+        self.text_dynamics.validate("text_dynamics", "text_dynamics")
 
         if not self.dataset.sequences:
             raise ConfigError("dataset.sequences must not be empty")
@@ -428,6 +478,14 @@ def _convert(value: Any, annotation: Any, path: str) -> Any:
             _convert(item, args[0], f"{path}[{index}]")
             for index, item in enumerate(value)
         ]
+    if origin is dict:
+        # Component params are validated by the implementation that consumes
+        # them, so only the container shape is checked here.
+        if not isinstance(value, Mapping):
+            raise ConfigError(f"{path} must be a mapping")
+        if any(not isinstance(key, str) for key in value):
+            raise ConfigError(f"{path} keys must be strings")
+        return dict(value)
     if origin in (Union, UnionType):
         if value is None and type(None) in args:
             return None

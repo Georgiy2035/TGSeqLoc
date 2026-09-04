@@ -18,6 +18,19 @@ sources:
   ocr: precomputed_paddleocr           # PaddleOCR JSON уже рассчитан вне TGSeqLoc.
   scene_graph: external_json           # Node-link scene graph уже рассчитан извне.
 
+# Стадии инференса. Форма backend/weights/params одинакова у всех переключаемых
+# узлов: backend выбирает реализацию из реестра, weights ссылается на запись
+# манифеста весов (не на путь), params разбирает сама реализация.
+segmentation:
+  backend: null                        # null — стадия выключена, масок нет.
+  weights: null
+  params: {}
+
+text_dynamics:
+  backend: null                        # Требует включённой segmentation.
+  weights: null
+  params: {}                           # Напр. threshold: 0.5 — доля площади бокса под маской.
+
 preprocess:
   text_filter: confidence              # Имя зарегистрированного фильтра.
   text_encoder_backend: multilingual_e5 # Registry factory замороженного encoder.

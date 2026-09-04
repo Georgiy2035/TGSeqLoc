@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tgseqloc.config import AppConfig, ConfigError, load_config
+from tgseqloc.config import AppConfig, ComponentConfig, ConfigError, load_config
 from tgseqloc.registry import Registry
 
 
@@ -106,6 +106,56 @@ model:
 
         with self.assertRaisesRegex(ConfigError, "dataset.test_ratio"):
             self.load_text("dataset:\n  test_ratio: .nan\n")
+
+    def test_allowed_backends_come_from_the_registry(self) -> None:
+        """Registering a component must be the only step to make it selectable."""
+
+        from tgseqloc.components import register_builtin_components
+
+        available = register_builtin_components().available("graph_encoder")
+        config = AppConfig()
+        config.model.graph_encoder = "definitely_not_registered"
+        with self.assertRaises(ConfigError) as caught:
+            config.validate()
+        for name in available:
+            self.assertIn(name, str(caught.exception))
+
+    def test_inference_stages_are_disabled_by_default(self) -> None:
+        config = AppConfig()
+        config.validate()
+        self.assertFalse(config.segmentation.enabled)
+        self.assertFalse(config.text_dynamics.enabled)
+        self.assertEqual(config.segmentation.params, {})
+
+    def test_dynamics_without_segmentation_is_rejected(self) -> None:
+        config = AppConfig()
+        config.text_dynamics = ComponentConfig(backend="mask_ioa")
+        with self.assertRaisesRegex(ConfigError, "requires segmentation.backend"):
+            config.validate()
+
+    def test_weights_without_backend_is_rejected(self) -> None:
+        config = AppConfig()
+        config.segmentation = ComponentConfig(weights="yolo11x_seg")
+        with self.assertRaisesRegex(ConfigError, "weights is set while"):
+            config.validate()
+
+    def test_component_params_load_from_yaml_untyped(self) -> None:
+        """Params belong to the implementation, so any mapping is accepted."""
+
+        config = self.load_text(
+            "segmentation:\n"
+            "  backend: null\n"
+            "  params:\n"
+            "    confidence: 0.4\n"
+            "    classes: [person, car]\n"
+        )
+        self.assertEqual(
+            config.segmentation.params, {"confidence": 0.4, "classes": ["person", "car"]}
+        )
+
+    def test_component_params_must_be_a_mapping(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "must be a mapping"):
+            self.load_text("segmentation:\n  params: [1, 2]\n")
 
 
 class RegistryTests(unittest.TestCase):

@@ -709,4 +709,26 @@ def process_v4rl(
     return manifest
 
 
+def discover_v4rl_inputs(config: Any) -> int:
+    """Check that every precomputed input exists and count the frames.
+
+    Attached to the adapter below so that the orchestrator can verify inputs
+    without knowing how V4RL is laid out on disk.
+    """
+
+    settings = _normalize_config(config)
+    records = discover_v4rl_records(
+        _get(settings, "dataset_root"),
+        _get(settings, "ocr_root_template"),
+        _get(settings, "scene_graph_root_template"),
+        _get(settings, "sequences", ("seq1", "seq2")),
+        chunk_size=int(_get(settings, "chunk_size", 200)),
+    )
+    gt_path = Path(_get(settings, "gt_path"))
+    if not gt_path.is_file():
+        raise FileNotFoundError(f"Missing V4RL ground truth: {gt_path}")
+    return len(records)
+
+
+process_v4rl.discover_inputs = discover_v4rl_inputs
 process_dataset = process_v4rl
