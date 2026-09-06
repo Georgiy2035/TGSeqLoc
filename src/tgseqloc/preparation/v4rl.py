@@ -91,9 +91,24 @@ def _normalize_config(config: Any) -> Any:
         "encoder_batch_size": _get(preprocess, "encoder_batch_size", 128),
         "frame_batch_size": _get(preprocess, "frame_batch_size", 256),
         "gt_tolerance_ns": _get(preprocess, "gt_tolerance_ns", 50_000_000),
+        "ocr_stage": _component_identity(_get(config, "ocr")),
+        "segmentation_stage": _component_identity(_get(config, "segmentation")),
+        "text_dynamics": _component_identity(_get(config, "text_dynamics")),
+        "prepared_root": _get(dataset, "prepared_root"),
         "cache_policy": _get(config, "cache_policy", _get(cache, "policy")),
         "device": device,
     }
+
+
+def _component_identity(component: Any) -> dict[str, Any] | None:
+    """Backend and params of a switchable stage, or None when it is disabled."""
+
+    if component is None:
+        return None
+    backend = _get(component, "backend")
+    if not backend:
+        return None
+    return {"backend": str(backend), "params": dict(_get(component, "params", {}) or {})}
 
 
 def _encoder_backend(preprocess: Any) -> str:
@@ -134,6 +149,9 @@ def build_preprocess_fingerprint(
         "connection_k": int(_get(config, "connection_k", 1)),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "ocr_noop_texts": sorted(_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS)),
+        "ocr_stage": _get(config, "ocr_stage"),
+        "segmentation_stage": _get(config, "segmentation_stage"),
+        "text_dynamics": _get(config, "text_dynamics"),
         "node_class_to_idx": dict(class_to_idx),
         "edge_label_to_idx": dict(edge_label_to_idx),
         "backend_identities": backend_identities,
@@ -317,7 +335,14 @@ def build_source_identities(
                 "index": record.index,
                 "stem": record.stem,
                 "image": source_file_identity(record.image_path),
-                "ocr": source_file_identity(record.ocr_path),
+                # Отсутствует, когда OCR считает сама стадия: её идентичность
+                # обеспечивают кэш стадии и ocr_stage в фингерпринте, а
+                # discovery уже потребовала бы файл, если бы он был нужен.
+                "ocr": (
+                    source_file_identity(record.ocr_path)
+                    if Path(record.ocr_path).is_file()
+                    else None
+                ),
                 "scene_graph": source_file_identity(record.graph_path),
             }
             for record in records
@@ -369,6 +394,59 @@ def is_compatible_output(
         pickle.UnpicklingError,
     ):
         return False
+
+
+def _frame_text(
+    config: Any,
+    record: FrameRecord,
+    ocr_parser: Callable[..., FrameText],
+    text_filter: Callable[..., bool] | None,
+) -> FrameText:
+    """Recognized text for one frame, from the cached stage or the parser."""
+
+    stage = _get(config, "ocr_stage")
+    if stage is None:
+        return ocr_parser(
+            record.ocr_path,
+            float(_get(config, "ocr_confidence_threshold", 0.0)),
+            noop_texts=_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS),
+            prediction_filter=text_filter,
+        )
+    from tgseqloc.stages import read_stage, stage_root
+
+    root = stage_root(
+        _get(config, "prepared_root"), _get(config, "dataset", "v4rl"), "ocr"
+    )
+    return read_stage("ocr", root, record.sequence, record.stem)
+
+
+def _drop_dynamic_text(
+    config: Any, record: FrameRecord, frame_text: FrameText
+) -> FrameText:
+    """Remove text sitting on ephemeral objects, if the stage is configured.
+
+    Text on a bus travels with the bus, so keeping it invites the model to
+    match places by a vehicle that drove through both.
+    """
+
+    dynamics = _get(config, "text_dynamics")
+    if dynamics is None or not frame_text.detections:
+        return frame_text
+    from tgseqloc.registry import registry
+    from tgseqloc.stages import read_stage, stage_root
+
+    masks = read_stage(
+        "segmentation",
+        stage_root(
+            _get(config, "prepared_root"),
+            _get(config, "dataset", "v4rl"),
+            "segmentation",
+        ),
+        record.sequence,
+        record.stem,
+    )
+    node = registry.create("text_dynamics", dynamics["backend"], **dynamics["params"])
+    return node.apply(frame_text, masks)
 
 
 def _make_encoder(
@@ -435,6 +513,7 @@ def process_v4rl(
         str(_get(config, "scene_graph_root_template")),
         sequences,
         chunk_size=int(_get(config, "chunk_size", 200)),
+        require_ocr=_get(config, "ocr_stage") is None,
     )
     class_to_idx, edge_label_to_idx = build_vocabularies(records)
     source_identities = build_source_identities(records, _get(config, "gt_path"))
@@ -538,12 +617,8 @@ def process_v4rl(
             object_nodes, scene_edges, dropped = scene_graph_parser(
                 record.graph_path, class_to_idx
             )
-            frame_text = ocr_parser(
-                record.ocr_path,
-                float(_get(config, "ocr_confidence_threshold", 0.0)),
-                noop_texts=_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS),
-                prediction_filter=text_filter,
-            )
+            frame_text = _frame_text(config, record, ocr_parser, text_filter)
+            frame_text = _drop_dynamic_text(config, record, frame_text)
             texts = frame_text.texts
             text_start = len(flat_texts)
             flat_texts.extend(texts)
@@ -741,6 +816,7 @@ def discover_v4rl_inputs(config: Any) -> int:
         _get(settings, "scene_graph_root_template"),
         _get(settings, "sequences", ("seq1", "seq2")),
         chunk_size=int(_get(settings, "chunk_size", 200)),
+        require_ocr=_get(settings, "ocr_stage") is None,
     )
     gt_path = Path(_get(settings, "gt_path"))
     if not gt_path.is_file():

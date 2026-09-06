@@ -39,8 +39,14 @@ def discover_v4rl_records(
     *,
     chunk_size: int = 200,
     require_inputs: bool = True,
+    require_ocr: bool | None = None,
 ) -> list[FrameRecord]:
-    """Discover ordered frames and their chunked graph/OCR sidecars."""
+    """Discover ordered frames and their chunked graph/OCR sidecars.
+
+    ``require_ocr`` overrides ``require_inputs`` for the OCR sidecar alone:
+    when the pipeline runs recognition itself, demanding a file another tool
+    was supposed to produce would defeat the point of the stage.
+    """
 
     records: list[FrameRecord] = []
     for sequence in sequences:
@@ -63,7 +69,8 @@ def discover_v4rl_records(
                 / f"{sequence}_c{chunk:03d}"
                 / f"{local:06d}.json"
             )
-            if require_inputs and not ocr_path.is_file():
+            need_ocr = require_inputs if require_ocr is None else require_ocr
+            if need_ocr and not ocr_path.is_file():
                 raise FileNotFoundError(f"Missing OCR for {sequence} frame {index}: {ocr_path}")
             if require_inputs and not graph_path.is_file():
                 raise FileNotFoundError(
