@@ -8,8 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .formats import FrameText, TextDetection
-from .schema import FrameRecord
+from .formats import FrameRecord, FrameText, TextDetection
 
 FRAME_RE = re.compile(r"^(?P<index>\d{6})_(?P<timestamp>\d{19})\.(?:png|jpg|jpeg)$", re.I)
 DEFAULT_NOOP_TEXTS = frozenset(
@@ -92,6 +91,33 @@ def discover_v4rl_records(
             raise ValueError(f"{sequence} timestamps are not monotonic")
         records.extend(sequence_records)
     return records
+
+
+def discover_frames(
+    dataset_root: str | Path,
+    ocr_root_template: str,
+    graph_root_template: str,
+    sequences: Sequence[str] = ("seq1", "seq2"),
+    *,
+    chunk_size: int = 200,
+) -> list[tuple[str, str, Path]]:
+    """Frames as ``(sequence, stem, image path)`` for the model stages.
+
+    Sidecars are not required: a stage computes what a sidecar would otherwise
+    have provided, so demanding one first would be circular.
+    """
+
+    return [
+        (record.sequence, record.stem, record.image_path)
+        for record in discover_v4rl_records(
+            dataset_root,
+            ocr_root_template,
+            graph_root_template,
+            sequences,
+            chunk_size=chunk_size,
+            require_inputs=False,
+        )
+    ]
 
 
 def _prediction_rows(data: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:

@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping
 import torch
 
 from tgseqloc.data.formats import FrameText
+from tgseqloc.data.identity import source_file_identity
 from tgseqloc.data.schema import (
     EDGE_FEATURE_DIM,
     NODE_FEATURE_DIM,
@@ -161,21 +162,6 @@ def build_preprocess_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def source_file_identity(path: str | Path) -> dict[str, Any]:
-    """Return a reproducible path/stat/content identity for one source file."""
-
-    source = Path(path)
-    stat = source.stat()
-    digest = hashlib.sha256()
-    with source.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return {
-        "path": str(source.resolve()),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "sha256": digest.hexdigest(),
-    }
 
 
 def _stable_value(value: Any) -> Any:

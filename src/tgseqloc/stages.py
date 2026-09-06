@@ -198,9 +198,15 @@ def build_stage_model(stage: str, config: Any) -> Any:
         params["weights_path"] = resolve(specs[component.weights])
     device = config.runtime.device
     if device == "auto":
-        import torch
+        # Asking torch about the GPU is the wrong question for a backend with
+        # its own runtime, and guessing "cpu" when torch is simply absent sends
+        # PaddleOCR down a CPU path that fails. Leave "auto" for the backend.
+        try:
+            import torch
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "auto"
     return factory(device=device, **params)
 
 
@@ -214,16 +220,22 @@ def run_configured_stage(
 ) -> StageResult:
     """Run one stage over the frames the configured dataset adapter discovers."""
 
-    from tgseqloc.preparation.v4rl import source_file_identity
-    from tgseqloc.registry import registry
+    # Both imports stay inside the torch-free data layer: this function has to
+    # work in an environment holding one model and nothing else.
+    from tgseqloc.data.v4rl import discover_frames as discover_v4rl
+    from tgseqloc.data.identity import source_file_identity
 
-    adapter = registry.get("dataset", config.dataset.adapter)
-    discover = getattr(adapter, "discover_frames", None)
-    if discover is None:
+    if config.dataset.adapter != "v4rl":
         raise RuntimeError(
-            f"dataset adapter {config.dataset.adapter!r} does not expose discover_frames"
+            f"no frame discovery for dataset adapter {config.dataset.adapter!r}"
         )
-    frames = list(discover(config))
+    frames = discover_v4rl(
+        config.dataset.root,
+        config.dataset.ocr_root_template,
+        config.dataset.scene_graph_root_template,
+        config.dataset.sequences,
+        chunk_size=config.dataset.chunk_size,
+    )
     if limit:
         frames = frames[:limit]
     root = stage_root(config.dataset.prepared_root, config.dataset.adapter, stage)

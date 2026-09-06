@@ -15,9 +15,28 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 Box = tuple[float, float, float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class FrameRecord:
+    """Paths and time identity for one source frame.
+
+    Lives here rather than beside the graph schema so that discovering frames
+    does not require torch: a stage that only runs a model must be usable in an
+    environment built for that model alone.
+    """
+
+    sequence: str
+    index: int
+    timestamp: int
+    stem: str
+    image_path: Path
+    ocr_path: Path
+    graph_path: Path
 
 
 def _validate_box(box: Sequence[float]) -> Box:

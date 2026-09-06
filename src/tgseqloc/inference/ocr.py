@@ -90,7 +90,7 @@ class PaddleOCRv5:
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=self.use_textline_orientation,
-            device="gpu:0" if str(self.device).startswith("cuda") else "cpu",
+            device=_paddle_device(self.device),
         )
 
     def predict(self, image_paths: Sequence[str | Path]) -> list[FrameText]:
@@ -128,6 +128,26 @@ class PaddleOCRv5:
                 "inference_time_ms": round((time.perf_counter() - started) * 1000, 2),
             },
         )
+
+
+def _paddle_device(device: str) -> str:
+    """Translate the pipeline's device name into PaddlePaddle's own.
+
+    ``auto`` is resolved with paddle's runtime rather than torch's: this
+    backend usually runs where torch is not installed at all.
+    """
+
+    value = str(device)
+    if value.startswith("cuda") or value.startswith("gpu"):
+        return "gpu:0"
+    if value != "auto":
+        return "cpu"
+    try:
+        import paddle
+
+        return "gpu:0" if paddle.device.cuda.device_count() > 0 else "cpu"
+    except Exception:  # noqa: BLE001 - any failure here just means no GPU
+        return "cpu"
 
 
 def _make_detection(
