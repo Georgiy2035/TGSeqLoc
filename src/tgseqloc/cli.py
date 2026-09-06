@@ -13,6 +13,7 @@ from tgseqloc.components import component_map, register_builtin_components
 from tgseqloc.config import load_config
 from tgseqloc.diagnostics import default_manifest_path, diagnose, format_report
 from tgseqloc.pipeline import PipelineRunner
+from tgseqloc.inspection import format_summary, frame_detail, inspect
 from tgseqloc.stages import STAGES, run_configured_stage
 from tgseqloc.weights import WeightError, check, fetch, load_manifest
 
@@ -184,6 +185,39 @@ def stage(
     _print(asdict(result))
     if not result.complete:
         raise typer.Exit(code=1)
+
+
+@app.command("inspect")
+def inspect_output(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    frame: str = typer.Option(
+        "", help="Look at one frame: SEQUENCE/FRAME_STEM."
+    ),
+    top_texts: int = typer.Option(15, help="How many frequent strings to list."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the report as JSON."),
+) -> None:
+    """Show what the pipeline produced: stages, graphs, and what was dropped.
+
+    Without --frame this summarizes the whole prepared dataset; with it, one
+    frame is shown stage by stage.
+    """
+
+    try:
+        loaded = load_config(config)
+        register_builtin_components()
+        if frame:
+            if "/" not in frame:
+                raise ValueError(f"expected SEQUENCE/FRAME_STEM, got {frame!r}")
+            sequence, stem = frame.split("/", 1)
+            _print(frame_detail(loaded, sequence, stem))
+            return
+        report = inspect(loaded, top_texts=top_texts)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise typer.ClickException(str(exc)) from exc
+    if as_json:
+        _print(report)
+    else:
+        typer.echo(format_summary(report))
 
 
 @app.command("components")
