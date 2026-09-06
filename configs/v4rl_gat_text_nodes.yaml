@@ -33,9 +33,12 @@ text_dynamics:
 
 preprocess:
   text_filter: confidence              # Имя зарегистрированного фильтра.
-  text_encoder_backend: multilingual_e5 # Registry factory замороженного encoder.
-  text_encoder: intfloat/multilingual-e5-small
-  revision: null                       # HF revision/commit; зафиксируйте для воспроизводимости.
+  text_encoder:                        # Та же форма backend/weights/params.
+    backend: multilingual_e5           # Или char_ngram — лексический, без весов.
+    weights: null
+    params:
+      model_name: intfloat/multilingual-e5-small
+      revision: null                   # HF commit; зафиксируйте для воспроизводимости.
   fusion: text_nodes
   connection_strategy: overlap_nearest # overlap_nearest|overlap|nearest|fully_connected.
   connection_k: 1                      # Используется стратегией nearest.

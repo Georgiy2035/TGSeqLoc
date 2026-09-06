@@ -33,7 +33,6 @@ from tgseqloc.data.v4rl import (
 )
 from tgseqloc.preparation.fusion import build_fused_graph
 from tgseqloc.preparation.text import (
-    DEFAULT_TEXT_ENCODER,
     FrozenTextEncoder,
     TextEncoder,
     validate_embeddings,
@@ -76,11 +75,14 @@ def _normalize_config(config: Any) -> Any:
         "source_scene_graph_backend": _get(
             _get(config, "sources"), "scene_graph", "external_json"
         ),
-        "text_encoder": _get(preprocess, "text_encoder", DEFAULT_TEXT_ENCODER),
-        "text_encoder_backend": _get(
-            preprocess, "text_encoder_backend", "multilingual_e5"
-        ),
-        "text_encoder_revision": _get(preprocess, "revision"),
+        # The encoder is configured as backend + params; the flat keys below
+        # are what the fingerprint has always hashed, so they keep their names.
+        # A lexical encoder has no model name, and claiming it uses the default
+        # one would put a false model into the manifest.
+        "text_encoder": _encoder_params(preprocess).get("model_name"),
+        "text_encoder_backend": _encoder_backend(preprocess),
+        "text_encoder_revision": _encoder_params(preprocess).get("revision"),
+        "text_encoder_params": _encoder_params(preprocess),
         "text_filter_backend": _get(preprocess, "text_filter", "confidence"),
         "fusion_backend": _get(preprocess, "fusion", "text_nodes"),
         "connection_strategy": _get(preprocess, "connection_strategy", "overlap_nearest"),
@@ -92,6 +94,21 @@ def _normalize_config(config: Any) -> Any:
         "cache_policy": _get(config, "cache_policy", _get(cache, "policy")),
         "device": device,
     }
+
+
+def _encoder_backend(preprocess: Any) -> str:
+    """Name of the selected encoder, tolerating a plain mapping in tests."""
+
+    encoder = _get(preprocess, "text_encoder")
+    return str(_get(encoder, "backend", "multilingual_e5") or "multilingual_e5")
+
+
+def _encoder_params(preprocess: Any) -> dict[str, Any]:
+    """Parameters the selected encoder's factory should receive."""
+
+    encoder = _get(preprocess, "text_encoder")
+    params = _get(encoder, "params", {}) or {}
+    return dict(params)
 
 
 def build_preprocess_fingerprint(
@@ -110,7 +127,7 @@ def build_preprocess_fingerprint(
         "dataset": _get(config, "dataset", "v4rl"),
         "sequences": list(_get(config, "sequences", ("seq1", "seq2"))),
         "chunk_size": int(_get(config, "chunk_size", 200)),
-        "text_encoder": _get(config, "text_encoder", DEFAULT_TEXT_ENCODER),
+        "text_encoder": _get(config, "text_encoder"),
         "text_encoder_revision": _get(config, "text_encoder_revision"),
         "text_embedding_dim": int(text_embedding_dim),
         "connection_strategy": _get(config, "connection_strategy", "overlap_nearest"),
@@ -258,7 +275,7 @@ def backend_identities(
             "text_filter": _get(config, "text_filter_backend", "confidence"),
             "fusion": _get(config, "fusion_backend", "text_nodes"),
             "encoder": _get(config, "text_encoder_backend", "multilingual_e5"),
-            "encoder_model": _get(config, "text_encoder", DEFAULT_TEXT_ENCODER),
+            "encoder_model": _get(config, "text_encoder"),
         },
         "implementations": {
             "ocr_parser": callable_identity(ocr_parser),
@@ -361,11 +378,12 @@ def _make_encoder(
 ) -> TextEncoder:
     if encoder is not None:
         return encoder
+    # Only device and batch size are common to every encoder; everything else
+    # is the chosen backend's own vocabulary and is passed through untouched.
     return factory(
-        model_name=_get(config, "text_encoder", DEFAULT_TEXT_ENCODER),
-        revision=_get(config, "text_encoder_revision"),
         device=_get(config, "device", "cpu"),
         batch_size=int(_get(config, "encoder_batch_size", 128)),
+        **dict(_get(config, "text_encoder_params", {}) or {}),
     )
 
 

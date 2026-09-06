@@ -99,7 +99,7 @@ def required_weights(config: AppConfig) -> dict[str, str]:
         if component.enabled and component.weights:
             required[component.weights] = section
     for kind, name, section in (
-        ("encoder", config.preprocess.text_encoder_backend, "preprocess.text_encoder_backend"),
+        ("encoder", str(config.preprocess.text_encoder.backend), "preprocess.text_encoder"),
         ("segmenter", config.segmentation.backend, "segmentation.backend"),
         ("text_dynamics", config.text_dynamics.backend, "text_dynamics.backend"),
     ):
@@ -137,7 +137,7 @@ def diagnose(
             ("source", config.sources.ocr),
             ("source", config.sources.scene_graph),
             ("filter", config.preprocess.text_filter),
-            ("encoder", config.preprocess.text_encoder_backend),
+            ("encoder", str(config.preprocess.text_encoder.backend)),
             ("fusion", config.preprocess.fusion),
             ("graph_encoder", config.model.graph_encoder),
             ("miner", config.training.miner),
@@ -213,11 +213,14 @@ def diagnose(
 
         from huggingface_hub import snapshot_download
 
-        model = config.preprocess.text_encoder
+        params = config.preprocess.text_encoder.params
+        model = params.get("model_name")
+        if not model:
+            return OK, f"{config.preprocess.text_encoder.backend} needs no download", None
         try:
             snapshot_download(
-                repo_id=model,
-                revision=config.preprocess.revision,
+                repo_id=str(model),
+                revision=params.get("revision"),
                 local_files_only=True,
             )
         except Exception:  # noqa: BLE001 - hub raises several unrelated types

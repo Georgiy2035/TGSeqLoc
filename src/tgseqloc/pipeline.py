@@ -35,7 +35,7 @@ class PipelineRunner:
             ("source", self.config.sources.ocr),
             ("source", self.config.sources.scene_graph),
             ("filter", self.config.preprocess.text_filter),
-            ("encoder", self.config.preprocess.text_encoder_backend),
+            ("encoder", str(self.config.preprocess.text_encoder.backend)),
             ("fusion", self.config.preprocess.fusion),
             ("graph_encoder", self.config.model.graph_encoder),
             ("miner", self.config.training.miner),
@@ -89,7 +89,7 @@ class PipelineRunner:
         return adapter(
             self.config,
             text_encoder_factory=registry.get(
-                "encoder", self.config.preprocess.text_encoder_backend
+                "encoder", str(self.config.preprocess.text_encoder.backend)
             ),
             ocr_parser=registry.get("source", self.config.sources.ocr),
             scene_graph_parser=registry.get(

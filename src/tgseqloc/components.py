@@ -8,7 +8,8 @@ from tgseqloc.inference.dynamics import build_mask_ioa
 from tgseqloc.inference.ocr import build_paddleocr_v5
 from tgseqloc.inference.segmentation import build_yolo_seg
 from tgseqloc.models import GATGraphEncoder
-from tgseqloc.preparation import FrozenTextEncoder, build_fused_graph, process_v4rl
+from tgseqloc.preparation import build_fused_graph, process_v4rl
+from tgseqloc.preparation.text import build_char_ngram_encoder, build_multilingual_e5
 from tgseqloc.registry import Registry, registry
 from tgseqloc.training import mine_hard_negatives
 
@@ -31,7 +32,10 @@ def register_builtin_components(target: Registry = registry) -> Registry:
         ("segmenter", "yolo_seg", build_yolo_seg),
         ("text_dynamics", "mask_ioa", build_mask_ioa),
         ("filter", "confidence", confidence_filter),
-        ("encoder", "multilingual_e5", FrozenTextEncoder),
+        ("encoder", "multilingual_e5", build_multilingual_e5),
+        # Lexical alternative: no weights, and character n-grams degrade
+        # gracefully where a subword tokenizer breaks on OCR errors.
+        ("encoder", "char_ngram", build_char_ngram_encoder),
         ("fusion", "text_nodes", build_fused_graph),
         ("graph_encoder", "gat", GATGraphEncoder),
         ("dataset", "v4rl", process_v4rl),

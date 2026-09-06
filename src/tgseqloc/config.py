@@ -23,6 +23,10 @@ CONNECTION_STRATEGIES = (
 )
 CACHE_POLICIES = ("reuse_if_compatible", "require_existing", "rebuild")
 
+# Duplicated from tgseqloc.preparation.text rather than imported: that module
+# pulls in torch, and configuration must stay cheap to import.
+DEFAULT_TEXT_ENCODER = "intfloat/multilingual-e5-small"
+
 
 def _registered(kind: str) -> tuple[str, ...]:
     """Return the implementations registered for ``kind``.
@@ -74,9 +78,15 @@ class PreprocessConfig:
     """Text filtering, encoding, graph fusion, and batching settings."""
 
     text_filter: str = "confidence"
-    text_encoder_backend: str = "multilingual_e5"
-    text_encoder: str = "intfloat/multilingual-e5-small"
-    revision: str | None = None
+    text_encoder: ComponentConfig = field(
+        default_factory=lambda: ComponentConfig(
+            backend="multilingual_e5",
+            params={"model_name": DEFAULT_TEXT_ENCODER, "revision": None},
+        )
+    )
+    """Which frozen encoder turns recognized strings into node features. The
+    model id and revision live in ``params`` because they mean nothing to the
+    other backends; a lexical encoder has neither."""
     fusion: str = "text_nodes"
     connection_strategy: str = "overlap_nearest"
     connection_k: int = 1
@@ -220,11 +230,11 @@ class AppConfig:
         _choice("sources.ocr", self.sources.ocr, _registered("source"))
         _choice("sources.scene_graph", self.sources.scene_graph, _registered("source"))
         _choice("preprocess.text_filter", self.preprocess.text_filter, _registered("filter"))
-        _choice(
-            "preprocess.text_encoder_backend",
-            self.preprocess.text_encoder_backend,
-            _registered("encoder"),
-        )
+        if not self.preprocess.text_encoder.enabled:
+            raise ConfigError(
+                "preprocess.text_encoder.backend is required: text nodes need features"
+            )
+        self.preprocess.text_encoder.validate("preprocess.text_encoder", "encoder")
         _choice("preprocess.fusion", self.preprocess.fusion, _registered("fusion"))
         _choice(
             "preprocess.connection_strategy",
@@ -349,12 +359,8 @@ class AppConfig:
             self.training.early_stopping_metric,
             available_metrics,
         )
-        for name, value in {
-            "preprocess.text_encoder": self.preprocess.text_encoder,
-            "output.experiment_name": self.output.experiment_name,
-        }.items():
-            if not value.strip():
-                raise ConfigError(f"{name} cannot be empty")
+        if not self.output.experiment_name.strip():
+            raise ConfigError("output.experiment_name cannot be empty")
         return self
 
     def to_dict(self) -> dict[str, Any]:

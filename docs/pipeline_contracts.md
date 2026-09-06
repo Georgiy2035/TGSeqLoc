@@ -21,7 +21,7 @@
 - **Допустимые значения берутся из реестра.** `validate()` спрашивает `registry.available(kind)`, а не сверяется с константным списком, поэтому регистрация компонента — единственный шаг, добавляющий тумблер.
 - **Зависимость стадий.** `text_dynamics.backend` требует включённого `segmentation.backend` и проверяется до имён backend'ов: сообщение о недостающей сегментации полезнее, чем о неизвестном имени.
 - **Обязательный вход.** Для `load_config` — YAML mapping; формально все поля имеют defaults, но реальный запуск требует существующие пути V4RL/OCR/SG/GT. YAML из `configs/v4rl_gat_text_nodes.yaml` перечисляет каждое поле.
-- **Опциональный вход.** `revision`, `resume_from`, `reranker` допускают `null`; остальные пропущенные поля получают dataclass-default. Поля выбора реализаций включают `preprocess.text_encoder_backend`, `training.miner` и `retrieval.metric`.
+- **Опциональный вход.** `revision`, `resume_from`, `reranker` допускают `null`; остальные пропущенные поля получают dataclass-default. Поля выбора реализаций включают `preprocess.text_encoder.backend`, `training.miner` и `retrieval.metric`.
 - **Выход.** Валидированный `AppConfig`; `component_map()` возвращает отсортированные доступные имена по kind.
 - **Проверки и ошибки.** Неизвестный YAML-ключ, неверный тип, неподдержанное имя, пустые/повторяющиеся sequences, одинаковые роли, неверные ratio/range/размеры и некорректный early-stopping key дают `ConfigError`. Registry отклоняет неизвестный kind/name и повторную регистрацию (`KeyError`), пустое имя (`ValueError`).
 - **Кэш.** Сам config не кэшируется; resolved config сохраняется в checkpoint, preprocessing-поля входят в fingerprint.
@@ -63,7 +63,7 @@
 
 ## 5. Замороженный multilingual E5
 
-- **Имя.** Config/registry `preprocess.text_encoder_backend: multilingual_e5`; config хранит Hugging Face model id отдельно в `preprocess.text_encoder` (default `intfloat/multilingual-e5-small`) и revision в `preprocess.revision`. `PipelineRunner` разрешает backend factory через registry и внедряет её в dataset adapter.
+- **Имя.** Config/registry `preprocess.text_encoder.backend`; доступны `multilingual_e5` (замороженный HF-энкодер; model id и revision лежат в его `params`) и `char_ngram` (лексический, хэшированные символьные n-граммы, без весов и без скачивания). `PipelineRunner` разрешает backend factory через registry и внедряет её в dataset adapter; фабрика получает только `device`, `batch_size` и собственные `params` выбранного backend.
 - **Обязательный вход.** Последовательность строк и доступная HF tokenizer/model revision; строки получают prefix `passage: `.
 - **Опциональный вход.** `revision`, `runtime.device`, `encoder_batch_size`; в тестах/интеграциях можно передать объект `TextEncoder` с `embedding_dim` и `encode`.
 - **Выход.** CPU `torch.float32 [N_t,D_t]`, mean pooling по attention mask, затем L2-нормализация строк.
