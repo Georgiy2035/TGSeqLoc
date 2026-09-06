@@ -9,10 +9,11 @@ from typing import Any, Callable
 
 import typer
 
-from tgseqloc.components import component_map
+from tgseqloc.components import component_map, register_builtin_components
 from tgseqloc.config import load_config
 from tgseqloc.diagnostics import default_manifest_path, diagnose, format_report
 from tgseqloc.pipeline import PipelineRunner
+from tgseqloc.stages import STAGES, run_configured_stage
 from tgseqloc.weights import WeightError, check, fetch, load_manifest
 
 app = typer.Typer(
@@ -159,6 +160,30 @@ def weights_sync(
         except WeightError as exc:
             raise typer.ClickException(str(exc)) from exc
     _print(fetched)
+
+
+@app.command()
+def stage(
+    name: str = typer.Argument(..., help=f"One of: {', '.join(STAGES)}."),
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    rebuild: bool = typer.Option(False, help="Recompute even what is current."),
+    limit: int = typer.Option(0, help="Process at most this many frames."),
+) -> None:
+    """Run one model stage over the dataset, writing one artifact per frame.
+
+    Stages are independent: OCR and segmentation can run in either order, on
+    different machines, and a repeat run only covers what changed.
+    """
+
+    try:
+        loaded = load_config(config)
+        register_builtin_components()
+        result = run_configured_stage(name, loaded, rebuild=rebuild, limit=limit or None)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise typer.ClickException(str(exc)) from exc
+    _print(asdict(result))
+    if not result.complete:
+        raise typer.Exit(code=1)
 
 
 @app.command("components")

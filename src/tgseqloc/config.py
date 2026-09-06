@@ -208,6 +208,10 @@ class AppConfig:
 
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
+    ocr: ComponentConfig = field(default_factory=ComponentConfig)
+    """Recognition run by the pipeline itself, as a cached stage. Distinct from
+    ``sources.ocr``, which reads what another tool already produced; with this
+    disabled preparation keeps using that parser."""
     segmentation: ComponentConfig = field(default_factory=ComponentConfig)
     """Dynamic-object segmentation. Disabled (``backend: null``) until a
     segmenter is registered; with it disabled the dynamics stage is skipped and
@@ -260,6 +264,7 @@ class AppConfig:
                 "text_dynamics.backend requires segmentation.backend: scoring text "
                 "against dynamic objects needs masks to score against"
             )
+        self.ocr.validate("ocr", "ocr")
         self.segmentation.validate("segmentation", "segmenter")
         self.text_dynamics.validate("text_dynamics", "text_dynamics")
 

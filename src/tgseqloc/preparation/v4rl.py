@@ -748,5 +748,25 @@ def discover_v4rl_inputs(config: Any) -> int:
     return len(records)
 
 
+def discover_v4rl_frames(config: Any) -> list[tuple[str, str, Path]]:
+    """Frames as (sequence, stem, image path) for the model stages.
+
+    Stages need only the images; OCR and scene-graph sidecars may legitimately
+    not exist yet when the pipeline computes them itself.
+    """
+
+    settings = _normalize_config(config)
+    records = discover_v4rl_records(
+        _get(settings, "dataset_root"),
+        _get(settings, "ocr_root_template"),
+        _get(settings, "scene_graph_root_template"),
+        _get(settings, "sequences", ("seq1", "seq2")),
+        chunk_size=int(_get(settings, "chunk_size", 200)),
+        require_inputs=False,
+    )
+    return [(r.sequence, r.stem, r.image_path) for r in records]
+
+
 process_v4rl.discover_inputs = discover_v4rl_inputs
+process_v4rl.discover_frames = discover_v4rl_frames
 process_dataset = process_v4rl
