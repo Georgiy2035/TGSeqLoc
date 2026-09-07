@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 
 import torch
 
-from tgseqloc.data.formats import FrameText
+from tgseqloc.data.formats import FrameText, replace_frame_texts
 from tgseqloc.data.identity import source_file_identity
 from tgseqloc.data.schema import (
     EDGE_FEATURE_DIM,
@@ -86,6 +86,8 @@ def _normalize_config(config: Any) -> Any:
         "text_encoder_params": _encoder_params(preprocess),
         "text_filter_backend": _get(preprocess, "text_filter", "confidence"),
         "fusion_backend": _get(preprocess, "fusion", "text_nodes"),
+        "use_text_nodes": bool(_get(preprocess, "use_text_nodes", True)),
+        "shuffle_text_seed": _get(preprocess, "shuffle_text_seed"),
         "connection_strategy": _get(preprocess, "connection_strategy", "overlap_nearest"),
         "connection_k": _get(preprocess, "connection_k", 1),
         "ocr_confidence_threshold": _get(preprocess, "ocr_confidence_threshold", 0.0),
@@ -148,6 +150,8 @@ def build_preprocess_fingerprint(
         "text_embedding_dim": int(text_embedding_dim),
         "connection_strategy": _get(config, "connection_strategy", "overlap_nearest"),
         "connection_k": int(_get(config, "connection_k", 1)),
+        "use_text_nodes": bool(_get(config, "use_text_nodes", True)),
+        "shuffle_text_seed": _get(config, "shuffle_text_seed"),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "ocr_noop_texts": sorted(_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS)),
         "ocr_stage": _get(config, "ocr_stage"),
@@ -435,6 +439,48 @@ def _drop_dynamic_text(
     return node.apply(frame_text, masks)
 
 
+def _shuffled_text_pool(
+    config: Any,
+    records: list[FrameRecord],
+    ocr_parser: Callable[..., FrameText],
+    text_filter: Callable[..., bool] | None,
+    seed: int,
+) -> dict[tuple[str, int], list[str]]:
+    """Permute recognized strings across the whole dataset.
+
+    The permutation has to be global. Preparation runs in batches of adjacent
+    frames, and adjacent frames look at the same shopfronts, so shuffling
+    inside a batch would leave the text almost where it was and the control
+    would prove nothing.
+
+    Box count per frame is preserved, so every graph keeps its nodes and edges
+    and only the strings move.
+    """
+
+    per_frame: list[tuple[tuple[str, int], list[str]]] = []
+    pool: list[str] = []
+    for record in records:
+        frame_text = _drop_dynamic_text(
+            config, record, _frame_text(config, record, ocr_parser, text_filter)
+        )
+        texts = frame_text.texts
+        per_frame.append(((record.sequence, record.index), texts))
+        pool.extend(texts)
+
+    import random
+
+    order = list(range(len(pool)))
+    random.Random(seed).shuffle(order)
+    permuted = [pool[position] for position in order]
+
+    result: dict[tuple[str, int], list[str]] = {}
+    cursor = 0
+    for key, texts in per_frame:
+        result[key] = permuted[cursor: cursor + len(texts)]
+        cursor += len(texts)
+    return result
+
+
 def _make_encoder(
     config: Any,
     encoder: TextEncoder | None,
@@ -500,6 +546,12 @@ def process_v4rl(
         sequences,
         chunk_size=int(_get(config, "chunk_size", 200)),
         require_ocr=_get(config, "ocr_stage") is None,
+    )
+    shuffle_seed = _get(config, "shuffle_text_seed")
+    shuffled_texts = (
+        _shuffled_text_pool(config, records, ocr_parser, text_filter, int(shuffle_seed))
+        if shuffle_seed is not None
+        else None
     )
     class_to_idx, edge_label_to_idx = build_vocabularies(records)
     source_identities = build_source_identities(records, _get(config, "gt_path"))
@@ -605,6 +657,12 @@ def process_v4rl(
             )
             frame_text = _frame_text(config, record, ocr_parser, text_filter)
             frame_text = _drop_dynamic_text(config, record, frame_text)
+            if shuffled_texts is not None:
+                replacement = shuffled_texts[(record.sequence, record.index)]
+                frame_text = replace_frame_texts(frame_text, replacement)
+            if not _get(config, "use_text_nodes", True):
+                # The "no text" ablation arm: only object nodes remain.
+                frame_text = frame_text.select([False] * len(frame_text))
             texts = frame_text.texts
             text_start = len(flat_texts)
             flat_texts.extend(texts)
@@ -769,12 +827,14 @@ def process_v4rl(
         "text_embedding_dim": embedding_dim,
         "connection_strategy": _get(config, "connection_strategy", "overlap_nearest"),
         "connection_k": int(_get(config, "connection_k", 1)),
+        "use_text_nodes": bool(_get(config, "use_text_nodes", True)),
+        "shuffle_text_seed": _get(config, "shuffle_text_seed"),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "node_class_to_idx": class_to_idx,
         "edge_label_to_idx": edge_label_to_idx,
         "num_obj_classes": len(class_to_idx),
         "num_edge_classes": len(edge_label_to_idx),
-        "uses_text_nodes": True,
+        "uses_text_nodes": bool(_get(config, "use_text_nodes", True)),
         "node_feature_dim": NODE_FEATURE_DIM,
         "edge_attr_dim": EDGE_FEATURE_DIM,
         "graph_rotated": False,

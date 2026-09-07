@@ -85,5 +85,44 @@ class FrameMasksTests(unittest.TestCase):
             FrameMasks(image_size=(640, -1))
 
 
+
+
+class ReplaceTextsTests(unittest.TestCase):
+    """The shuffled-text control must change only the strings."""
+
+    def frame(self) -> FrameText:
+        return FrameText(
+            detections=(
+                detection(box=(0.1, 0.1, 0.4, 0.4), text="TESCO", confidence=0.9),
+                detection(box=(0.5, 0.5, 0.6, 0.6), text="BUS", confidence=0.7),
+            ),
+            image_size=(640, 480),
+        )
+
+    def test_boxes_and_confidences_survive(self) -> None:
+        from tgseqloc.data.formats import replace_frame_texts
+
+        original = self.frame()
+        swapped = replace_frame_texts(original, ["PETRON", "STOP"])
+        self.assertEqual(swapped.texts, ["PETRON", "STOP"])
+        self.assertEqual(swapped.boxes, original.boxes)
+        self.assertEqual(
+            [d.confidence for d in swapped.detections],
+            [d.confidence for d in original.detections],
+        )
+
+    def test_count_must_match(self) -> None:
+        from tgseqloc.data.formats import replace_frame_texts
+
+        with self.assertRaisesRegex(ValueError, "1 texts for 2 detections"):
+            replace_frame_texts(self.frame(), ["ONLY"])
+
+    def test_original_is_untouched(self) -> None:
+        from tgseqloc.data.formats import replace_frame_texts
+
+        original = self.frame()
+        replace_frame_texts(original, ["A", "B"])
+        self.assertEqual(original.texts, ["TESCO", "BUS"])
+
 if __name__ == "__main__":
     unittest.main()

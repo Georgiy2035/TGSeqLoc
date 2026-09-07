@@ -14,6 +14,7 @@ _EXPORTS = {
     "FrameMasks": "formats",
     "FrameText": "formats",
     "TextDetection": "formats",
+    "replace_frame_texts": "formats",
     "EDGE_FEATURE_DIM": "schema",
     "NODE_FEATURE_DIM": "schema",
     "SCHEMA_VERSION": "schema",

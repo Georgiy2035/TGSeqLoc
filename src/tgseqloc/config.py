@@ -87,6 +87,16 @@ class PreprocessConfig:
     """Which frozen encoder turns recognized strings into node features. The
     model id and revision live in ``params`` because they mean nothing to the
     other backends; a lexical encoder has neither."""
+    shuffle_text_seed: int | None = None
+    """Control arm: permute recognized strings across the whole dataset,
+    keeping every box, node and edge in place. If a run scores the same with
+    scrambled text as with real text, the gain comes from graph structure
+    rather than from what the signs say -- which is the first thing a reader
+    will ask. ``None`` disables it."""
+    use_text_nodes: bool = True
+    """Whether text nodes are built at all. ``false`` leaves a graph of object
+    nodes only -- the "no text" arm of an ablation. The model must then be
+    configured with ``model.use_text_nodes: false`` to match."""
     fusion: str = "text_nodes"
     connection_strategy: str = "overlap_nearest"
     connection_k: int = 1
@@ -194,6 +204,12 @@ class RuntimeConfig:
     device: str = "auto"
     seed: int = 42
     num_workers: int = 4
+    deterministic: bool = True
+    """Force deterministic CUDA kernels. Graph aggregation uses atomic adds,
+    which reorder between runs, so without this two runs of one configuration
+    differ -- measured at 7.5 points of Recall@5, more than most effects being
+    compared. Turn it off only if an operation has no deterministic
+    implementation."""
 
 
 @dataclass(slots=True)

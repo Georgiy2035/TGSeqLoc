@@ -150,6 +150,27 @@ class FrameText:
         )
 
 
+def replace_frame_texts(frame: FrameText, texts: Sequence[str]) -> FrameText:
+    """Return a copy whose detections carry different strings.
+
+    Boxes, confidences and ordering are untouched, so the graph built from the
+    result is structurally identical -- which is what makes it a control rather
+    than a different experiment.
+    """
+
+    if len(texts) != len(frame.detections):
+        raise ValueError(
+            f"got {len(texts)} texts for {len(frame.detections)} detections"
+        )
+    return replace(
+        frame,
+        detections=tuple(
+            replace(detection, text=str(text))
+            for detection, text in zip(frame.detections, texts, strict=True)
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FrameMasks:
     """Dynamic-object coverage of one frame.
