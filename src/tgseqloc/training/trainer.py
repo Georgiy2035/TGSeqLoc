@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import random
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -247,6 +248,33 @@ def collate_graphs(items) -> Batch:
     return Batch.from_data_list(flat)
 
 
+def seed_everything(seed: int, *, deterministic: bool = True) -> torch.Generator:
+    """Seed every generator a run draws from, and return one for DataLoader.
+
+    Called before the model is built, not after: weight initialization draws
+    from the global generator, so seeding inside train() left the starting
+    point random.
+
+    Seeding alone is not enough on a GPU. Graph aggregation sums messages with
+    atomic adds whose order varies between runs, so the same model on the same
+    input returns different numbers. ``deterministic`` pins that down; the
+    cuBLAS workspace variable has to be set before the handle is created,
+    which is why it is set here rather than left to the caller.
+    """
+
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True, warn_only=False)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
 def make_graph_loader(
     paths: Sequence[str | Path],
     edge_normalizer: EdgeAttrNormalizer | None = None,
@@ -257,6 +285,7 @@ def make_graph_loader(
     num_workers: int = 0,
     shuffle: bool = False,
     device: str | torch.device = "cpu",
+    generator: torch.Generator | None = None,
 ) -> DataLoader:
     dataset = GraphPathDataset(
         paths, edge_normalizer, text_emb_dim, edge_attr_dim=edge_attr_dim
@@ -268,6 +297,7 @@ def make_graph_loader(
         num_workers=num_workers,
         collate_fn=Batch.from_data_list,
         pin_memory=torch.device(device).type == "cuda",
+        generator=generator if shuffle else None,
     )
 
 
@@ -579,6 +609,7 @@ class Trainer:
         runtime_names = {
             "seed": "runtime.seed",
             "num_workers": "runtime.num_workers",
+            "deterministic": "runtime.deterministic",
         }
         names = [f"training.{name}", name]
         if name in runtime_names:
@@ -829,6 +860,9 @@ class Trainer:
 
     def train(self, resume_from: str | Path | None = None) -> dict:
         seed = int(self._training_value("seed", 42))
+        generator = seed_everything(
+            seed, deterministic=bool(self._training_value("deterministic", True))
+        )
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -867,6 +901,7 @@ class Trainer:
             num_workers=int(self._training_value("num_workers", 0)),
             collate_fn=collate_graphs,
             pin_memory=self.device.type == "cuda",
+            generator=generator,
         )
         criterion = nn.TripletMarginLoss(
             margin=float(self._training_value("margin", 0.3)), p=2

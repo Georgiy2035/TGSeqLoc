@@ -143,6 +143,15 @@ class PipelineRunner:
             num_node_classes=max(1, int(manifest["num_obj_classes"])),
             num_edge_classes=max(1, int(manifest["num_edge_classes"])),
         )
+        # Засев до создания модели: инициализация весов тянет из глобального
+        # генератора, и без этого два запуска одной конфигурации расходились
+        # на 7.5 пункта Recall@5 — больше, чем измеряемые эффекты.
+        from tgseqloc.training.trainer import seed_everything
+
+        seed_everything(
+            int(self.config.runtime.seed),
+            deterministic=bool(self.config.runtime.deterministic),
+        )
         model = registry.create(
             "graph_encoder", self.config.model.graph_encoder, **model_args
         )
