@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
+import click
 import typer
 
 from tgseqloc.components import component_map, register_builtin_components
@@ -32,7 +33,7 @@ def _execute(config: Path, operation: Callable[[PipelineRunner], Any]) -> None:
         runner = PipelineRunner(load_config(config))
         _print(operation(runner))
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise typer.ClickException(str(exc)) from exc
+        raise click.ClickException(str(exc)) from exc
 
 
 @app.command()
@@ -104,7 +105,7 @@ def doctor(
     try:
         loaded = load_config(config)
     except (OSError, ValueError) as exc:
-        raise typer.ClickException(f"configuration is unusable: {exc}") from exc
+        raise click.ClickException(f"configuration is unusable: {exc}") from exc
 
     report = diagnose(loaded, check_inputs=check_inputs, verify_hashes=verify_hashes)
     if as_json:
@@ -146,7 +147,7 @@ def weights_sync(
     specs = load_manifest(default_manifest_path())
     unknown = sorted(set(name or ()) - set(specs))
     if unknown:
-        raise typer.ClickException(f"not in the manifest: {', '.join(unknown)}")
+        raise click.ClickException(f"not in the manifest: {', '.join(unknown)}")
     selected = [specs[key] for key in (name or sorted(specs))]
 
     fetched: dict[str, str] = {}
@@ -159,7 +160,7 @@ def weights_sync(
         try:
             fetched[spec.name] = str(fetch(spec))
         except WeightError as exc:
-            raise typer.ClickException(str(exc)) from exc
+            raise click.ClickException(str(exc)) from exc
     _print(fetched)
 
 
@@ -181,7 +182,7 @@ def stage(
         register_builtin_components()
         result = run_configured_stage(name, loaded, rebuild=rebuild, limit=limit or None)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise typer.ClickException(str(exc)) from exc
+        raise click.ClickException(str(exc)) from exc
     _print(asdict(result))
     if not result.complete:
         raise typer.Exit(code=1)
@@ -213,7 +214,7 @@ def inspect_output(
             return
         report = inspect(loaded, top_texts=top_texts)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise typer.ClickException(str(exc)) from exc
+        raise click.ClickException(str(exc)) from exc
     if as_json:
         _print(report)
     else:

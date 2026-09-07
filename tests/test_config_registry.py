@@ -189,3 +189,33 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TextNodeAblationTests(unittest.TestCase):
+    """The "no text" arm must reach the graphs, not only the model."""
+
+    def test_flag_defaults_to_building_text_nodes(self) -> None:
+        self.assertTrue(AppConfig().preprocess.use_text_nodes)
+
+    def test_disabling_text_nodes_yields_object_only_graphs(self) -> None:
+        import tempfile
+
+        from tests.helpers import make_app_config
+        from tgseqloc.pipeline import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config, _ = make_app_config(Path(temporary), frame_count=4)
+            config.preprocess.use_text_nodes = False
+            config.model.use_text_nodes = False
+            manifest = PipelineRunner(config).prepare()
+            self.assertFalse(manifest["uses_text_nodes"])
+
+            import torch
+
+            for record in manifest["graph_records"]:
+                graph = torch.load(
+                    Path(config.dataset.prepared_root) / "v4rl" / record["path"],
+                    map_location="cpu", weights_only=False,
+                )
+                self.assertEqual(int(graph.is_text.sum()), 0)
+                self.assertEqual(list(graph.text_strings), [])
