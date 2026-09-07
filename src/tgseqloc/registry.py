@@ -64,6 +64,18 @@ class Filter(Protocol):
 
 
 @runtime_checkable
+class TextCorrection(Protocol):
+    """Repairs recognized strings before they reach an encoder.
+
+    Sits between recognition and encoding because it belongs to neither: the
+    recognizer has already committed to its output, and every encoder should be
+    able to consume the repaired text.
+    """
+
+    def correct_all(self, texts: Sequence[str]) -> Sequence[str]: ...
+
+
+@runtime_checkable
 class Encoder(Protocol):
     """Maps a batch of modality values to embeddings."""
 
@@ -142,6 +154,7 @@ class Registry:
             "ocr",
             "segmenter",
             "text_dynamics",
+            "text_correction",
             "filter",
             "encoder",
             "fusion",

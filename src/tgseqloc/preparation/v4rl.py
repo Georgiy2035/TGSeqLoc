@@ -88,6 +88,7 @@ def _normalize_config(config: Any) -> Any:
         "fusion_backend": _get(preprocess, "fusion", "text_nodes"),
         "use_text_nodes": bool(_get(preprocess, "use_text_nodes", True)),
         "shuffle_text_seed": _get(preprocess, "shuffle_text_seed"),
+        "text_correction": _component_identity(_get(preprocess, "text_correction")),
         "connection_strategy": _get(preprocess, "connection_strategy", "overlap_nearest"),
         "connection_k": _get(preprocess, "connection_k", 1),
         "ocr_confidence_threshold": _get(preprocess, "ocr_confidence_threshold", 0.0),
@@ -152,6 +153,7 @@ def build_preprocess_fingerprint(
         "connection_k": int(_get(config, "connection_k", 1)),
         "use_text_nodes": bool(_get(config, "use_text_nodes", True)),
         "shuffle_text_seed": _get(config, "shuffle_text_seed"),
+        "text_correction": _get(config, "text_correction"),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "ocr_noop_texts": sorted(_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS)),
         "ocr_stage": _get(config, "ocr_stage"),
@@ -439,6 +441,35 @@ def _drop_dynamic_text(
     return node.apply(frame_text, masks)
 
 
+def _build_corrector(
+    config: Any,
+    records: list[FrameRecord],
+    ocr_parser: Callable[..., FrameText],
+    text_filter: Callable[..., bool] | None,
+) -> Any:
+    """Create the configured corrector, seeded with the dataset's own strings.
+
+    A general dictionary holds neither PECLARD nor BOUCHERIE, and correcting
+    them toward common words would remove precisely what identifies the place.
+    The vocabulary therefore comes from what the recognizer actually produced.
+    """
+
+    settings = _get(config, "text_correction")
+    if not settings:
+        return None
+    from tgseqloc.registry import registry
+
+    texts: list[str] = []
+    for record in records:
+        frame_text = _drop_dynamic_text(
+            config, record, _frame_text(config, record, ocr_parser, text_filter)
+        )
+        texts.extend(frame_text.texts)
+    return registry.create(
+        "text_correction", settings["backend"], texts, **settings["params"]
+    )
+
+
 def _shuffled_text_pool(
     config: Any,
     records: list[FrameRecord],
@@ -547,6 +578,7 @@ def process_v4rl(
         chunk_size=int(_get(config, "chunk_size", 200)),
         require_ocr=_get(config, "ocr_stage") is None,
     )
+    corrector = _build_corrector(config, records, ocr_parser, text_filter)
     shuffle_seed = _get(config, "shuffle_text_seed")
     shuffled_texts = (
         _shuffled_text_pool(config, records, ocr_parser, text_filter, int(shuffle_seed))
@@ -657,6 +689,10 @@ def process_v4rl(
             )
             frame_text = _frame_text(config, record, ocr_parser, text_filter)
             frame_text = _drop_dynamic_text(config, record, frame_text)
+            if corrector is not None and len(frame_text):
+                frame_text = replace_frame_texts(
+                    frame_text, corrector.correct_all(frame_text.texts)
+                )
             if shuffled_texts is not None:
                 replacement = shuffled_texts[(record.sequence, record.index)]
                 frame_text = replace_frame_texts(frame_text, replacement)
@@ -829,6 +865,7 @@ def process_v4rl(
         "connection_k": int(_get(config, "connection_k", 1)),
         "use_text_nodes": bool(_get(config, "use_text_nodes", True)),
         "shuffle_text_seed": _get(config, "shuffle_text_seed"),
+        "text_correction": _get(config, "text_correction"),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "node_class_to_idx": class_to_idx,
         "edge_label_to_idx": edge_label_to_idx,

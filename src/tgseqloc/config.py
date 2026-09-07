@@ -74,39 +74,6 @@ SourcesConfig = SourceConfig
 
 
 @dataclass(slots=True)
-class PreprocessConfig:
-    """Text filtering, encoding, graph fusion, and batching settings."""
-
-    text_filter: str = "confidence"
-    text_encoder: ComponentConfig = field(
-        default_factory=lambda: ComponentConfig(
-            backend="multilingual_e5",
-            params={"model_name": DEFAULT_TEXT_ENCODER, "revision": None},
-        )
-    )
-    """Which frozen encoder turns recognized strings into node features. The
-    model id and revision live in ``params`` because they mean nothing to the
-    other backends; a lexical encoder has neither."""
-    shuffle_text_seed: int | None = None
-    """Control arm: permute recognized strings across the whole dataset,
-    keeping every box, node and edge in place. If a run scores the same with
-    scrambled text as with real text, the gain comes from graph structure
-    rather than from what the signs say -- which is the first thing a reader
-    will ask. ``None`` disables it."""
-    use_text_nodes: bool = True
-    """Whether text nodes are built at all. ``false`` leaves a graph of object
-    nodes only -- the "no text" arm of an ablation. The model must then be
-    configured with ``model.use_text_nodes: false`` to match."""
-    fusion: str = "text_nodes"
-    connection_strategy: str = "overlap_nearest"
-    connection_k: int = 1
-    ocr_confidence_threshold: float = 0.0
-    encoder_batch_size: int = 128
-    frame_batch_size: int = 256
-    gt_tolerance_ns: int = 50_000_000
-
-
-@dataclass(slots=True)
 class ComponentConfig:
     """One swappable stage: which implementation, its weights, its parameters.
 
@@ -133,6 +100,43 @@ class ComponentConfig:
         if not self.backend.strip():
             raise ConfigError(f"{path}.backend cannot be empty; use null to disable")
         _choice(f"{path}.backend", self.backend, _registered(kind))
+
+
+@dataclass(slots=True)
+class PreprocessConfig:
+    """Text filtering, encoding, graph fusion, and batching settings."""
+
+    text_filter: str = "confidence"
+    text_encoder: ComponentConfig = field(
+        default_factory=lambda: ComponentConfig(
+            backend="multilingual_e5",
+            params={"model_name": DEFAULT_TEXT_ENCODER, "revision": None},
+        )
+    )
+    """Which frozen encoder turns recognized strings into node features. The
+    model id and revision live in ``params`` because they mean nothing to the
+    other backends; a lexical encoder has neither."""
+    text_correction: ComponentConfig = field(default_factory=ComponentConfig)
+    """Optional repair of recognized strings before encoding. Disabled by
+    default: a corrector pulls words toward its dictionary, and the shop names
+    that identify a place are exactly what a general dictionary lacks."""
+    shuffle_text_seed: int | None = None
+    """Control arm: permute recognized strings across the whole dataset,
+    keeping every box, node and edge in place. If a run scores the same with
+    scrambled text as with real text, the gain comes from graph structure
+    rather than from what the signs say -- which is the first thing a reader
+    will ask. ``None`` disables it."""
+    use_text_nodes: bool = True
+    """Whether text nodes are built at all. ``false`` leaves a graph of object
+    nodes only -- the "no text" arm of an ablation. The model must then be
+    configured with ``model.use_text_nodes: false`` to match."""
+    fusion: str = "text_nodes"
+    connection_strategy: str = "overlap_nearest"
+    connection_k: int = 1
+    ocr_confidence_threshold: float = 0.0
+    encoder_batch_size: int = 128
+    frame_batch_size: int = 256
+    gt_tolerance_ns: int = 50_000_000
 
 
 @dataclass(slots=True)
@@ -280,6 +284,9 @@ class AppConfig:
                 "text_dynamics.backend requires segmentation.backend: scoring text "
                 "against dynamic objects needs masks to score against"
             )
+        self.preprocess.text_correction.validate(
+            "preprocess.text_correction", "text_correction"
+        )
         self.ocr.validate("ocr", "ocr")
         self.segmentation.validate("segmentation", "segmenter")
         self.text_dynamics.validate("text_dynamics", "text_dynamics")

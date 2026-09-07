@@ -44,6 +44,7 @@ def _graph_entries() -> tuple[Entry, ...]:
     from tgseqloc.evaluation import RecallAtK, Retriever
     from tgseqloc.models import GATGraphEncoder
     from tgseqloc.preparation import build_fused_graph, process_v4rl
+    from tgseqloc.preparation.spelling import build_symspell
     from tgseqloc.preparation.text import (
         build_char_ngram_encoder,
         build_multilingual_e5,
@@ -53,6 +54,7 @@ def _graph_entries() -> tuple[Entry, ...]:
     return (
         ("source", "precomputed_paddleocr", parse_paddleocr),
         ("source", "external_json", parse_scene_graph),
+        ("text_correction", "symspell", build_symspell),
         ("encoder", "multilingual_e5", build_multilingual_e5),
         # Lexical alternative: no weights, and character n-grams degrade
         # gracefully where a subword tokenizer breaks on OCR errors.
