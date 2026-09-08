@@ -428,3 +428,56 @@ class DynamicNodeClassTests(unittest.TestCase):
             classes, _ = build_vocabularies([record], dynamic_classes=("car",))
             self.assertNotIn("car", classes)
             self.assertIn("wall", classes)
+
+
+class SymmetricSceneEdgeTests(unittest.TestCase):
+    """Направление ребра управляет потоком сообщений, а не смыслом связи."""
+
+    def graph(self, symmetric: bool):
+        import torch
+        from tgseqloc.preparation.fusion import build_fused_graph
+
+        nodes = [
+            {"class_idx": 1, "class_name": "car", "center": [0.3, 0.7],
+             "wh": [0.2, 0.2], "xyxy": [0.2, 0.6, 0.4, 0.8]},
+            {"class_idx": 2, "class_name": "ground", "center": [0.5, 0.9],
+             "wh": [1.0, 0.2], "xyxy": [0.0, 0.8, 1.0, 1.0]},
+        ]
+        return build_fused_graph(
+            nodes, [(0, 1, "on")], [], [], torch.zeros((0, 4)),
+            {"unknown": 0, "on": 1}, symmetric_scene_edges=symmetric,
+        )
+
+    def test_default_keeps_one_direction(self) -> None:
+        graph = self.graph(False)
+        self.assertEqual(graph.edge_index.shape[1], 1)
+        self.assertEqual(graph.edge_index[:, 0].tolist(), [0, 1])
+
+    def test_symmetric_adds_the_reverse(self) -> None:
+        graph = self.graph(True)
+        self.assertEqual(graph.edge_index.shape[1], 2)
+        self.assertEqual(sorted(map(tuple, graph.edge_index.t().tolist())),
+                         [(0, 1), (1, 0)])
+
+    def test_the_relation_label_is_kept_on_both(self) -> None:
+        """Обратных предикатов в словаре нет; выдумывать их значило бы класть
+        в граф строки, которых генератор не выдавал."""
+
+        graph = self.graph(True)
+        self.assertEqual(graph.edge_label.tolist(), [1, 1])
+
+    def test_reverse_edge_gets_its_own_geometry(self) -> None:
+        """Признаки ребра направленные: у обратного они свои, а не копия."""
+
+        graph = self.graph(True)
+        forward, backward = graph.edge_attr[0].tolist(), graph.edge_attr[1].tolist()
+        self.assertNotEqual(forward, backward)
+
+    def test_endpoint_classes_follow_the_direction(self) -> None:
+        graph = self.graph(True)
+        self.assertEqual(graph.edge_u_class.tolist(), [1, 2])
+        self.assertEqual(graph.edge_v_class.tolist(), [2, 1])
+
+    def test_scene_edges_are_not_marked_as_text_edges(self) -> None:
+        graph = self.graph(True)
+        self.assertEqual(graph.is_text_edge.tolist(), [False, False])

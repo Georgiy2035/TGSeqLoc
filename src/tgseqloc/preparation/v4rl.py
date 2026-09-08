@@ -70,6 +70,7 @@ def _normalize_config(config: Any) -> Any:
         "image_path_template": _get(dataset, "image_path_template"),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
         "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
+        "symmetric_scene_edges": bool(_get(preprocess, "symmetric_scene_edges", False)),
         "scene_graph_root_template": _get(dataset, "scene_graph_root_template"),
         "gt_path": _get(dataset, "gt_path"),
         "output_root": _get(dataset, "prepared_root"),
@@ -159,6 +160,7 @@ def build_preprocess_fingerprint(
         "traversals": _get(config, "traversals"),
         "gt_radius_m": _get(config, "gt_radius_m"),
         "dynamic_node_classes": sorted(_get(config, "dynamic_node_classes", ()) or ()),
+        "symmetric_scene_edges": bool(_get(config, "symmetric_scene_edges", False)),
         "text_encoder": _get(config, "text_encoder"),
         "text_encoder_revision": _get(config, "text_encoder_revision"),
         "text_embedding_dim": int(text_embedding_dim),
@@ -822,6 +824,9 @@ def process_v4rl(
                 connection_strategy=_get(config, "connection_strategy", "overlap_nearest"),
                 connection_k=int(_get(config, "connection_k", 1)),
                 metadata=metadata,
+                symmetric_scene_edges=bool(
+                    _get(config, "symmetric_scene_edges", False)
+                ),
             )
             _atomic_torch_save(graph, output_path)
             written += 1

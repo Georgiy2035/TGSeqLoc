@@ -150,6 +150,9 @@ class PreprocessConfig:
     # node, which is what V4RL used; RobotCar needs it because half of all
     # graph nodes there are vehicles and people.
     dynamic_node_classes: list[str] = field(default_factory=list)
+    # Add the reverse of every scene relation. Off by default: every
+    # reported result was produced without it.
+    symmetric_scene_edges: bool = False
     frame_batch_size: int = 256
     gt_tolerance_ns: int = 50_000_000
 
