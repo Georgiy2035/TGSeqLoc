@@ -65,6 +65,10 @@ def _normalize_config(config: Any) -> Any:
         "sequences": _get(dataset, "sequences", ("seq1", "seq2")),
         "ocr_root_template": _get(dataset, "ocr_root_template"),
         "ocr_file_name": _get(dataset, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
+        "traversals": _get(dataset, "traversals"),
+        "ins_path_template": _get(dataset, "ins_path_template"),
+        "image_path_template": _get(dataset, "image_path_template"),
+        "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
         "scene_graph_root_template": _get(dataset, "scene_graph_root_template"),
         "gt_path": _get(dataset, "gt_path"),
         "output_root": _get(dataset, "prepared_root"),
@@ -151,6 +155,8 @@ def build_preprocess_fingerprint(
         # Recorded even though each frame's sidecar is hashed by content: the
         # manifest should say which recognizer produced the graphs.
         "ocr_file_name": _get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
+        "traversals": _get(config, "traversals"),
+        "gt_radius_m": _get(config, "gt_radius_m"),
         "text_encoder": _get(config, "text_encoder"),
         "text_encoder_revision": _get(config, "text_encoder_revision"),
         "text_embedding_dim": int(text_embedding_dim),
@@ -546,6 +552,54 @@ def _graph_value(graph: Any, key: str, default: Any = None) -> Any:
     return getattr(graph, key, default)
 
 
+
+SUPPORTED_DATASETS = frozenset({"v4rl", "robotcar"})
+
+
+def write_v4rl_split(
+    config: Any, records: list[FrameRecord], mappings_root: Path
+) -> tuple[dict[str, Any], Any]:
+    """V4RL ground truth: a correspondence file plus a split by time ratio.
+
+    Returns the split and the parsed correspondence file, the latter being what
+    defines a correct answer here and therefore part of the identity of any
+    checkpoint trained on it.
+    """
+
+    mapping = build_gt_mapping(
+        _get(config, "gt_path"), records,
+        int(_get(config, "gt_tolerance_ns", 50_000_000)),
+        reference_sequence=str(_get(config, "reference_sequence", "seq1")),
+        query_sequence=str(_get(config, "query_sequence", "seq2")),
+    )
+    save_json(mapping, mappings_root / "gt_shop_street_1.json")
+    query_sequence = mapping["query_sequence"]
+    query_records = [record for record in records if record.sequence == query_sequence]
+    positives = build_positive_intervals(
+        mapping, query_records, interpolate=bool(_get(config, "interpolate_gt", False))
+    )
+    split = build_temporal_split(
+        len(query_records), positives,
+        test_ratio=float(_get(config, "test_ratio", 0.2)),
+        validation_ratio=float(_get(config, "validation_ratio", 0.1)),
+        require_nonempty=False,
+    )
+    reference_sequence = mapping["reference_sequence"]
+    reference_records = [
+        record for record in records if record.sequence == reference_sequence
+    ]
+    split["database_paths"] = [
+        f"{record.sequence}/{record.stem}.pt" for record in reference_records
+    ]
+    split["query_paths"] = [
+        f"{record.sequence}/{record.stem}.pt" for record in query_records
+    ]
+    split["reference_sequence"] = reference_sequence
+    split["query_sequence"] = query_sequence
+    save_json(split, mappings_root / "temporal_split.json")
+    return split, mapping
+
+
 def process_v4rl(
     config: Any,
     *,
@@ -555,17 +609,29 @@ def process_v4rl(
     scene_graph_parser: Callable[..., tuple[list[dict[str, Any]], list[tuple[int, int, str]], int]] = parse_scene_graph,
     text_filter: Callable[[Mapping[str, Any], float], bool] | None = None,
     fusion_builder: Callable[..., Any] = build_fused_graph,
+    record_discovery: Callable[[Any], list[FrameRecord]] | None = None,
+    split_writer: Callable[[Any, list[FrameRecord], Path], tuple[dict[str, Any], Any]] | None = None,
 ) -> dict[str, Any]:
-    """Prepare all V4RL frames and return the written manifest.
+    """Prepare every frame of a dataset and return the written manifest.
 
     ``config`` may be a dataclass, argparse Namespace, or mapping. An injected
     encoder avoids Hugging Face downloads in tests and controlled pipelines.
+
+    Only two things differ between datasets: which frames exist, and how a
+    query's correct answers and the train/test division are decided.
+    ``record_discovery`` and ``split_writer`` are those seams and default to
+    V4RL. Everything between them -- reading text, dropping dynamic detections,
+    encoding, fusing and caching one graph per frame -- is the same work
+    whatever produced the frames, so it is not written twice.
     """
 
     config = _normalize_config(config)
     dataset = _get(config, "dataset", "v4rl")
-    if dataset != "v4rl":
-        raise ValueError(f"Unsupported dataset adapter: {dataset}")
+    if dataset not in SUPPORTED_DATASETS:
+        raise ValueError(
+            f"Unsupported dataset adapter: {dataset}; "
+            f"available: {', '.join(sorted(SUPPORTED_DATASETS))}"
+        )
     required = (
         "dataset_root", "ocr_root_template", "scene_graph_root_template",
         "gt_path", "output_root",
@@ -575,15 +641,20 @@ def process_v4rl(
         raise ValueError(f"Missing V4RL preparation settings: {', '.join(missing)}")
 
     sequences = tuple(_get(config, "sequences", ("seq1", "seq2")))
-    records = discover_v4rl_records(
-        _get(config, "dataset_root"),
-        str(_get(config, "ocr_root_template")),
-        str(_get(config, "scene_graph_root_template")),
-        sequences,
-        chunk_size=int(_get(config, "chunk_size", 200)),
-        require_ocr=_get(config, "ocr_stage") is None,
-        ocr_file_name=str(_get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
-    )
+    if record_discovery is not None:
+        records = record_discovery(config)
+    else:
+        records = discover_v4rl_records(
+            _get(config, "dataset_root"),
+            str(_get(config, "ocr_root_template")),
+            str(_get(config, "scene_graph_root_template")),
+            sequences,
+            chunk_size=int(_get(config, "chunk_size", 200)),
+            require_ocr=_get(config, "ocr_stage") is None,
+            ocr_file_name=str(_get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
+        )
+    if not records:
+        raise RuntimeError("Frame discovery produced no records")
     corrector = _build_corrector(config, records, ocr_parser, text_filter)
     shuffle_seed = _get(config, "shuffle_text_seed")
     shuffled_texts = (
@@ -753,38 +824,9 @@ def process_v4rl(
             written += 1
             dropped_this_run += dropped
 
-    mapping = build_gt_mapping(
-        _get(config, "gt_path"), records,
-        int(_get(config, "gt_tolerance_ns", 50_000_000)),
-        reference_sequence=str(_get(config, "reference_sequence", "seq1")),
-        query_sequence=str(_get(config, "query_sequence", "seq2")),
-    )
     mappings_root = output_root / "mappings"
-    save_json(mapping, mappings_root / "gt_shop_street_1.json")
-    query_sequence = mapping["query_sequence"]
-    query_records = [record for record in records if record.sequence == query_sequence]
-    positives = build_positive_intervals(
-        mapping, query_records, interpolate=bool(_get(config, "interpolate_gt", False))
-    )
-    split = build_temporal_split(
-        len(query_records), positives,
-        test_ratio=float(_get(config, "test_ratio", 0.2)),
-        validation_ratio=float(_get(config, "validation_ratio", 0.1)),
-        require_nonempty=False,
-    )
-    reference_sequence = mapping["reference_sequence"]
-    reference_records = [
-        record for record in records if record.sequence == reference_sequence
-    ]
-    split["database_paths"] = [
-        f"{record.sequence}/{record.stem}.pt" for record in reference_records
-    ]
-    split["query_paths"] = [
-        f"{record.sequence}/{record.stem}.pt" for record in query_records
-    ]
-    split["reference_sequence"] = reference_sequence
-    split["query_sequence"] = query_sequence
-    save_json(split, mappings_root / "temporal_split.json")
+    writer = split_writer if split_writer is not None else write_v4rl_split
+    split, ground_truth_descriptor = writer(config, records, mappings_root)
 
     expected_graphs = []
     compatible_count = 0
@@ -836,7 +878,7 @@ def process_v4rl(
                 entry["path"]: entry["sha256"] for entry in expected_graphs
             },
             "ground_truth": source_identities["ground_truth"],
-            "mapping": mapping,
+            "mapping": ground_truth_descriptor,
             "temporal_split": split,
         }
     )
@@ -883,7 +925,11 @@ def process_v4rl(
         "graph_rotated": False,
         "dropped_scene_edge_count_this_run": dropped_this_run,
         "dropped_scene_edge_count": total_dropped,
-        "mapping_path": "mappings/gt_shop_street_1.json",
+        "mapping_path": (
+            "mappings/gt_shop_street_1.json"
+            if (mappings_root / "gt_shop_street_1.json").is_file()
+            else None
+        ),
         "temporal_split_path": "mappings/temporal_split.json",
         "output_layout": "{dataset}/{sequence}/{frame_stem}.pt",
     }

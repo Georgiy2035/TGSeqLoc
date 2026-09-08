@@ -54,6 +54,13 @@ class DatasetConfig:
     # schema into the same per-frame directory under its own name, so an OCR
     # ablation swaps this and reuses one set of graphs, splits and GT.
     ocr_file_name: str = "paddleocr_v5.json"
+    # RobotCar names its recordings by date; role -> recording. Ground truth is
+    # a distance in metres against the INS log rather than a correspondence
+    # file, so the radius belongs to the dataset, not to the training protocol.
+    traversals: dict[str, str] = field(default_factory=dict)
+    ins_path_template: str = ""
+    image_path_template: str = ""
+    gt_radius_m: float = 25.0
     scene_graph_root_template: str = "data/scene_graphs/{sequence}"
     gt_path: Path = Path("data/V4RL/gt/gt_shop_street_1.txt")
     prepared_root: Path = Path("data/prepared")

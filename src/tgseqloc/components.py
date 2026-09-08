@@ -53,6 +53,7 @@ def _graph_entries() -> tuple[Entry, ...]:
     from tgseqloc.evaluation import RecallAtK, Retriever
     from tgseqloc.models import GATGraphEncoder
     from tgseqloc.preparation import build_fused_graph, process_v4rl
+    from tgseqloc.preparation.robotcar import process_robotcar
     from tgseqloc.preparation.spelling import build_symspell
     from tgseqloc.preparation.text import (
         build_char_ngram_encoder,
@@ -71,6 +72,7 @@ def _graph_entries() -> tuple[Entry, ...]:
         ("fusion", "text_nodes", build_fused_graph),
         ("graph_encoder", "gat", GATGraphEncoder),
         ("dataset", "v4rl", process_v4rl),
+        ("dataset", "robotcar", process_robotcar),
         ("miner", "hard_negative", mine_hard_negatives),
         ("retriever", "faiss_cosine", Retriever),
         ("metric", "recall_at_k", RecallAtK),

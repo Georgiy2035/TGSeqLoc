@@ -1,0 +1,112 @@
+"""Метрическая ground truth и географическое разбиение RobotCar."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from tgseqloc.data.robotcar import (
+    Track,
+    build_geographic_split,
+    build_radius_positives,
+    load_ins_track,
+)
+
+
+class TrackTests(unittest.TestCase):
+    def track(self) -> Track:
+        return Track((100, 200, 300), ((0.0, 0.0), (10.0, 0.0), (10.0, 10.0)))
+
+    def test_position_is_interpolated_between_samples(self) -> None:
+        self.assertEqual(self.track().position_at(150), (5.0, 0.0))
+
+    def test_exact_sample_is_returned(self) -> None:
+        self.assertEqual(self.track().position_at(200), (10.0, 0.0))
+
+    def test_frame_outside_the_log_has_no_position(self) -> None:
+        """Экстраполяция здесь выдумала бы ground truth."""
+
+        self.assertIsNone(self.track().position_at(50))
+        self.assertIsNone(self.track().position_at(400))
+
+    def test_unsorted_rows_are_ordered_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ins.csv"
+            path.write_text(
+                "timestamp,northing,easting\n300,10,10\n100,0,0\n200,10,0\n",
+                encoding="utf-8",
+            )
+            track = load_ins_track(path)
+            self.assertEqual(track.timestamps, (100, 200, 300))
+            self.assertEqual(track.position_at(150), (5.0, 0.0))
+
+
+class PositivesTests(unittest.TestCase):
+    def test_every_database_frame_within_the_radius_is_a_positive(self) -> None:
+        database = {0: (0.0, 0.0), 1: (10.0, 0.0), 2: (100.0, 0.0)}
+        positives = build_radius_positives({7: (5.0, 0.0)}, database, radius=25.0)
+        self.assertEqual(positives[7], [0, 1])
+
+    def test_a_query_with_nothing_near_is_absent(self) -> None:
+        """Отсутствие положительных — утверждение о покрытии, а не о файле."""
+
+        positives = build_radius_positives({1: (0.0, 0.0)}, {0: (500.0, 0.0)}, 25.0)
+        self.assertEqual(positives, {})
+
+    def test_radius_must_be_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            build_radius_positives({}, {}, radius=0.0)
+
+
+class SplitTests(unittest.TestCase):
+    def positions(self) -> dict[int, tuple[float, float]]:
+        # Прямой проезд на 900 м, затем возврат в начальную точку.
+        forward = {i: (float(i * 100), 0.0) for i in range(10)}
+        forward[9] = (0.0, 0.0)
+        return forward
+
+    def test_test_segment_comes_from_the_end_of_the_route(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.0, radius=25.0)
+        self.assertEqual(split["test_query_indices"], [8, 9])
+        self.assertEqual(split["excluded_test_indices"], [])
+
+    def test_a_revisit_is_dropped_from_the_test_set(self) -> None:
+        """Маршрут возвращается на пройденное; иначе тест отвечался бы обучением."""
+
+        positions = self.positions()
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.0, radius=25.0)
+        self.assertEqual(split["excluded_test_indices"], [9])
+        self.assertEqual(split["test_query_indices"], [8])
+
+    def test_validation_is_taken_from_the_training_segment(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(20)}
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.25, radius=25.0)
+        self.assertTrue(set(split["validation_query_indices"]).isdisjoint(
+            split["test_query_indices"]))
+        self.assertTrue(set(split["train_query_indices"]).isdisjoint(
+            split["validation_query_indices"]))
+
+    def test_queries_without_positives_are_not_scored(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        positives = {i: [0] for i in positions if i % 2 == 0}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.0, radius=25.0)
+        self.assertEqual(split["test_query_indices"], [8])
+
+    def test_radius_is_recorded_in_the_split(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        split = build_geographic_split(positions, {i: [0] for i in positions},
+                                       test_ratio=0.2, validation_ratio=0.0, radius=30.0)
+        self.assertEqual(split["split_radius_m"], 30.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
