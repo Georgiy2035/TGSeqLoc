@@ -219,3 +219,21 @@ class TextNodeAblationTests(unittest.TestCase):
                 )
                 self.assertEqual(int(graph.is_text.sum()), 0)
                 self.assertEqual(list(graph.text_strings), [])
+
+
+class ConfidenceFilterTests(unittest.TestCase):
+    """Фильтр уверенности и распознаватели, которые её не сообщают."""
+
+    def test_reported_confidence_is_compared(self) -> None:
+        from tgseqloc.components import confidence_filter
+
+        self.assertTrue(confidence_filter({"confidence": 0.9}, 0.5))
+        self.assertFalse(confidence_filter({"confidence": 0.3}, 0.5))
+
+    def test_unreported_confidence_passes(self) -> None:
+        """Qwen3-VL пишет null; ноль здесь обнулил бы всю ветку сравнения."""
+
+        from tgseqloc.components import confidence_filter
+
+        self.assertTrue(confidence_filter({"confidence": None}, 0.5))
+        self.assertTrue(confidence_filter({"text": "STARBUCKS"}, 0.5))

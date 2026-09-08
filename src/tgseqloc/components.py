@@ -21,9 +21,18 @@ GROUPS = ("inference", "graph")
 
 
 def confidence_filter(sample: dict, threshold: float = 0.0) -> bool:
-    """Return whether an OCR prediction passes the configured confidence."""
+    """Return whether an OCR prediction passes the configured confidence.
 
-    return float(sample.get("confidence", sample.get("score", 0.0))) >= threshold
+    A generative recognizer reports no confidence at all, so an absent score is
+    not a zero score: treating it as zero would let any positive threshold
+    silently empty that recognizer's arm of a comparison. Unreported confidence
+    passes every threshold instead, matching :func:`~tgseqloc.data.v4rl.parse_paddleocr`.
+    """
+
+    reported = sample.get("confidence", sample.get("score"))
+    if reported is None:
+        return True
+    return float(reported) >= threshold
 
 
 def _inference_entries() -> tuple[Entry, ...]:
