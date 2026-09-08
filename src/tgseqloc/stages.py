@@ -222,20 +222,9 @@ def run_configured_stage(
 
     # Both imports stay inside the torch-free data layer: this function has to
     # work in an environment holding one model and nothing else.
-    from tgseqloc.data.v4rl import discover_frames as discover_v4rl
     from tgseqloc.data.identity import source_file_identity
 
-    if config.dataset.adapter != "v4rl":
-        raise RuntimeError(
-            f"no frame discovery for dataset adapter {config.dataset.adapter!r}"
-        )
-    frames = discover_v4rl(
-        config.dataset.root,
-        config.dataset.ocr_root_template,
-        config.dataset.scene_graph_root_template,
-        config.dataset.sequences,
-        chunk_size=config.dataset.chunk_size,
-    )
+    frames = _discover_frames(config)
     if limit:
         frames = frames[:limit]
     root = stage_root(config.dataset.prepared_root, config.dataset.adapter, stage)
@@ -248,6 +237,42 @@ def run_configured_stage(
         rebuild=rebuild,
         on_progress=on_progress,
     )
+
+
+
+def _discover_frames(config: Any) -> list[tuple[str, str, Path]]:
+    """Frames for a stage, from whichever dataset adapter is configured.
+
+    Imports stay inside the function and inside the torch-free data layer: a
+    stage has to run in an environment holding one model and nothing else, and
+    that environment must not be made to import a dataset it will not touch.
+    """
+
+    adapter = config.dataset.adapter
+    if adapter == "v4rl":
+        from tgseqloc.data.v4rl import discover_frames as discover
+
+        return discover(
+            config.dataset.root,
+            config.dataset.ocr_root_template,
+            config.dataset.scene_graph_root_template,
+            config.dataset.sequences,
+            chunk_size=config.dataset.chunk_size,
+        )
+    if adapter == "robotcar":
+        from tgseqloc.data.robotcar import discover_robotcar_records
+
+        return [
+            (record.sequence, record.stem, record.image_path)
+            for record in discover_robotcar_records(
+                config.dataset.ocr_root_template,
+                config.dataset.scene_graph_root_template,
+                dict(config.dataset.traversals),
+                image_path_template=config.dataset.image_path_template,
+                ocr_file_name=config.dataset.ocr_file_name,
+            )
+        ]
+    raise RuntimeError(f"no frame discovery for dataset adapter {adapter!r}")
 
 
 def read_stage(stage: str, root: Path, sequence: str, frame_stem: str) -> Any:

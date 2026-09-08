@@ -210,11 +210,20 @@ def parse_paddleocr(
 
 
 def parse_scene_graph(
-    path: str | Path, class_to_idx: Mapping[str, int]
+    path: str | Path,
+    class_to_idx: Mapping[str, int],
+    dynamic_classes: Iterable[str] = (),
 ) -> tuple[list[dict[str, Any]], list[tuple[int, int, str]], int]:
-    """Parse an external node-link scene graph, dropping dangling edges."""
+    """Parse an external node-link scene graph, dropping dangling edges.
+
+    ``dynamic_classes`` removes ephemeral objects by name. The generator labels
+    every object, so a class is a stronger statement about ephemerality than a
+    segmentation mask -- and it is what the generator's own static mode uses.
+    Edges touching a removed node go with it.
+    """
 
     graph = load_json(path)
+    ephemeral = {str(name).strip().casefold() for name in dynamic_classes}
     nodes: list[dict[str, Any]] = []
     id_to_index: dict[Any, int] = {}
     for raw in graph.get("nodes", []):
@@ -226,6 +235,8 @@ def parse_scene_graph(
         if x2 <= x1 or y2 <= y1:
             continue
         name = str(payload.get("class_name", payload.get("label", "unknown"))).strip() or "unknown"
+        if name.casefold() in ephemeral:
+            continue
         identifier = raw.get("id", payload.get("id"))
         id_to_index[identifier] = len(nodes)
         nodes.append(
@@ -252,13 +263,18 @@ def parse_scene_graph(
 
 def build_vocabularies(
     records: Iterable[FrameRecord],
+    dynamic_classes: Iterable[str] = (),
 ) -> tuple[dict[str, int], dict[str, int]]:
+    ephemeral = {str(name).strip().casefold() for name in dynamic_classes}
     classes, labels = {"unknown"}, {"unknown"}
     for record in records:
         graph = load_json(record.graph_path)
         for raw in graph.get("nodes", []):
             payload = raw.get("data", raw)
-            classes.add(str(payload.get("class_name", payload.get("label", "unknown"))).strip() or "unknown")
+            name = str(payload.get("class_name", payload.get("label", "unknown"))).strip() or "unknown"
+            if name.casefold() in ephemeral:
+                continue
+            classes.add(name)
         for raw in graph.get("links", graph.get("edges", [])):
             labels.add(str(raw.get("label", raw.get("type", "unknown"))).strip() or "unknown")
     class_to_idx = {"unknown": 0, **{name: index for index, name in enumerate(sorted(classes - {"unknown"}), 1)}}

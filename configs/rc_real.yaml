@@ -17,9 +17,21 @@ dataset:
   query_sequence: query
   test_ratio: 0.2
   validation_ratio: 0.1
+segmentation:
+  backend: yolo_seg
+  weights: yolo11x_seg
+  params:
+    confidence: 0.25
+text_dynamics:
+  backend: mask_ioa
+  params:
+    threshold: 0.5
 preprocess:
   use_text_nodes: true
   encoder_batch_size: 256
+  # Половина узлов графа RobotCar — машины и люди. Генератор в статическом
+  # режиме убирает ровно их; здесь то же самое делается по имени класса.
+  dynamic_node_classes: [car, adult, child, bike, bus, dog, cat, bag, hat]
   text_encoder:
     backend: char_ngram
     params:

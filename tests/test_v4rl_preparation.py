@@ -7,7 +7,9 @@ from pathlib import Path
 
 import torch
 
+from tgseqloc.data.formats import FrameRecord
 from tgseqloc.data.v4rl import (
+    build_vocabularies,
     build_gt_mapping,
     build_temporal_split,
     discover_v4rl_records,
@@ -364,3 +366,65 @@ class UnreportedConfidenceTests(unittest.TestCase):
             path = self._sidecar(Path(tmp), 0.3)
             self.assertEqual(len(parse_paddleocr(path, 0.9).detections), 0)
             self.assertEqual(len(parse_paddleocr(path, 0.1).detections), 1)
+
+
+class DynamicNodeClassTests(unittest.TestCase):
+    """Эфемерные объекты убираются из графа по имени класса."""
+
+    GRAPH = {
+        "nodes": [
+            {"id": 1, "data": {"class_name": "wall", "bbox_2d": {"xyxy": [0, 0, 1, 1]}}},
+            {"id": 2, "data": {"class_name": "car", "bbox_2d": {"xyxy": [0.2, 0.2, 0.6, 0.6]}}},
+            {"id": 3, "data": {"class_name": "tree", "bbox_2d": {"xyxy": [0.5, 0, 0.9, 0.5]}}},
+        ],
+        "links": [
+            {"source": 2, "target": 1, "label": "on"},
+            {"source": 3, "target": 1, "label": "next-to"},
+        ],
+    }
+
+    def _graph(self, root: Path) -> Path:
+        path = root / "graph.json"
+        path.write_text(json.dumps(self.GRAPH), encoding="utf-8")
+        return path
+
+    def test_without_a_filter_every_node_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes, edges, _ = parse_scene_graph(
+                self._graph(Path(tmp)), {"unknown": 0, "wall": 1, "car": 2, "tree": 3}
+            )
+            self.assertEqual([n["class_name"] for n in nodes], ["wall", "car", "tree"])
+            self.assertEqual(len(edges), 2)
+
+    def test_named_classes_are_removed_with_their_edges(self) -> None:
+        """Ребро, висящее на удалённом узле, уходит вместе с ним."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes, edges, dropped = parse_scene_graph(
+                self._graph(Path(tmp)),
+                {"unknown": 0, "wall": 1, "car": 2, "tree": 3},
+                dynamic_classes=("car",),
+            )
+            self.assertEqual([n["class_name"] for n in nodes], ["wall", "tree"])
+            self.assertEqual([label for _, _, label in edges], ["next-to"])
+            self.assertEqual(dropped, 1)
+
+    def test_matching_ignores_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes, _, _ = parse_scene_graph(
+                self._graph(Path(tmp)),
+                {"unknown": 0, "wall": 1, "car": 2, "tree": 3},
+                dynamic_classes=("CAR",),
+            )
+            self.assertNotIn("car", [n["class_name"] for n in nodes])
+
+    def test_vocabulary_excludes_removed_classes(self) -> None:
+        """Иначе словарь классов зависел бы от того, что мы выбросили."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = FrameRecord("base", 0, 1, "1", root, root / "ocr.json",
+                                 self._graph(root))
+            classes, _ = build_vocabularies([record], dynamic_classes=("car",))
+            self.assertNotIn("car", classes)
+            self.assertIn("wall", classes)

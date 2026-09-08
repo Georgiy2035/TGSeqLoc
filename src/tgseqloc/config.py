@@ -146,6 +146,10 @@ class PreprocessConfig:
     connection_k: int = 1
     ocr_confidence_threshold: float = 0.0
     encoder_batch_size: int = 128
+    # Object classes to drop from the graph as ephemeral. Empty keeps every
+    # node, which is what V4RL used; RobotCar needs it because half of all
+    # graph nodes there are vehicles and people.
+    dynamic_node_classes: list[str] = field(default_factory=list)
     frame_batch_size: int = 256
     gt_tolerance_ns: int = 50_000_000
 

@@ -69,6 +69,7 @@ def _normalize_config(config: Any) -> Any:
         "ins_path_template": _get(dataset, "ins_path_template"),
         "image_path_template": _get(dataset, "image_path_template"),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
+        "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
         "scene_graph_root_template": _get(dataset, "scene_graph_root_template"),
         "gt_path": _get(dataset, "gt_path"),
         "output_root": _get(dataset, "prepared_root"),
@@ -157,6 +158,7 @@ def build_preprocess_fingerprint(
         "ocr_file_name": _get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
         "traversals": _get(config, "traversals"),
         "gt_radius_m": _get(config, "gt_radius_m"),
+        "dynamic_node_classes": sorted(_get(config, "dynamic_node_classes", ()) or ()),
         "text_encoder": _get(config, "text_encoder"),
         "text_encoder_revision": _get(config, "text_encoder_revision"),
         "text_embedding_dim": int(text_embedding_dim),
@@ -662,7 +664,8 @@ def process_v4rl(
         if shuffle_seed is not None
         else None
     )
-    class_to_idx, edge_label_to_idx = build_vocabularies(records)
+    dynamic_node_classes = tuple(_get(config, "dynamic_node_classes", ()) or ())
+    class_to_idx, edge_label_to_idx = build_vocabularies(records, dynamic_node_classes)
     source_identities = build_source_identities(records, _get(config, "gt_path"))
     for backend, implementation in {
         "OCR source": ocr_parser,
@@ -762,7 +765,7 @@ def process_v4rl(
                 skipped += 1
                 continue
             object_nodes, scene_edges, dropped = scene_graph_parser(
-                record.graph_path, class_to_idx
+                record.graph_path, class_to_idx, dynamic_node_classes
             )
             frame_text = _frame_text(config, record, ocr_parser, text_filter)
             frame_text = _drop_dynamic_text(config, record, frame_text)
