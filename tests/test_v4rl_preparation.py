@@ -323,3 +323,44 @@ class OcrFileNameTests(unittest.TestCase):
             {**base, "ocr_file_name": "qwen3_vl_4b.json"}, {}, {}, 64
         )
         self.assertNotEqual(first, second)
+
+
+class UnreportedConfidenceTests(unittest.TestCase):
+    """Генеративный распознаватель не выдаёт уверенности вовсе."""
+
+    def _sidecar(self, root: Path, confidence) -> Path:
+        path = root / "frame.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "image_width": 752,
+                    "image_height": 480,
+                    "predictions": [
+                        {"bbox": [10, 10, 40, 20], "text": "STARBUCKS",
+                         "confidence": confidence}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_null_confidence_is_parsed(self) -> None:
+        """Qwen3-VL пишет null в каждом предсказании; float(None) падал."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = parse_paddleocr(self._sidecar(Path(tmp), None))
+            self.assertEqual(frame.texts, ["STARBUCKS"])
+
+    def test_unreported_confidence_survives_a_threshold(self) -> None:
+        """Отсутствие оценки -- не нулевая оценка: иначе ветка обнулилась бы."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._sidecar(Path(tmp), None)
+            self.assertEqual(len(parse_paddleocr(path, 0.9).detections), 1)
+
+    def test_a_reported_confidence_still_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._sidecar(Path(tmp), 0.3)
+            self.assertEqual(len(parse_paddleocr(path, 0.9).detections), 0)
+            self.assertEqual(len(parse_paddleocr(path, 0.1).detections), 1)

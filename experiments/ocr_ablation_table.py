@@ -81,7 +81,12 @@ def text_stats(sidecar: str) -> dict:
                     continue
                 boxes += 1
                 strings[text.casefold()] += 1
-                confidences.append(float(row.get("confidence", 0.0)))
+                # Генеративный распознаватель уверенности не сообщает; писать
+                # за него ноль значило бы показать в таблице измерение, которого
+                # не было.
+                reported = row.get("confidence")
+                if reported is not None:
+                    confidences.append(float(reported))
                 lengths.append(len(text))
                 texts.add(text.casefold())
             per_frame[f"{sequence}/{frame_dir.name}"] = texts
@@ -89,7 +94,9 @@ def text_stats(sidecar: str) -> dict:
         "frames": frames,
         "boxes_per_frame": boxes / frames if frames else 0.0,
         "unique": len(strings),
-        "mean_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+        "mean_confidence": (
+            sum(confidences) / len(confidences) if confidences else None
+        ),
         "mean_length": sum(lengths) / len(lengths) if lengths else 0.0,
         "per_frame": per_frame,
     }
@@ -137,9 +144,14 @@ def main() -> None:
     print("{:16} {:>8} {:>12} {:>11} {:>7} {:>7}".format(
         "распознаватель", "кадров", "боксов/кадр", "уникальных", "увер.", "длина"))
     for name, row in stats.items():
-        print("{:16} {:>8} {:>12.2f} {:>11} {:>7.2f} {:>7.1f}".format(
+        confidence = (
+            "{:.2f}".format(row["mean_confidence"])
+            if row["mean_confidence"] is not None
+            else "н/д"
+        )
+        print("{:16} {:>8} {:>12.2f} {:>11} {:>7} {:>7.1f}".format(
             name, row["frames"], row["boxes_per_frame"],
-            row["unique"], row["mean_confidence"], row["mean_length"]))
+            row["unique"], confidence, row["mean_length"]))
 
     print("\n=== Согласие распознавателей (IoU множеств строк на общих кадрах) ===")
     names = [name for name in ARMS if stats[name]["frames"]]

@@ -146,7 +146,17 @@ def parse_paddleocr(
     noop_texts: Iterable[str] = DEFAULT_NOOP_TEXTS,
     prediction_filter: Callable[[Mapping[str, Any], float], bool] | None = None,
 ) -> FrameText:
-    """Parse precomputed PaddleOCR JSON into the canonical frame format."""
+    """Parse a precomputed recognizer sidecar into the canonical frame format.
+
+    Every recognizer in the benchmark writes this schema, so the parser is not
+    specific to PaddleOCR despite the name it is registered under.
+
+    Confidence may be absent: a generative recognizer produces text, not a
+    calibrated score, and Qwen3-VL writes ``null`` on every prediction. Absent
+    is not zero -- scoring it as zero would let any positive threshold silently
+    empty that arm of a comparison -- so an unreported confidence passes every
+    threshold instead.
+    """
 
     data = load_json(path)
     width = float(data.get("image_width", data.get("width", 0)))
@@ -156,7 +166,8 @@ def parse_paddleocr(
     noops = {str(value).strip().casefold() for value in noop_texts}
     detections: list[TextDetection] = []
     for row in _prediction_rows(data):
-        confidence = float(row.get("confidence", row.get("score", 0.0)))
+        reported = row.get("confidence", row.get("score"))
+        confidence = 1.0 if reported is None else float(reported)
         if prediction_filter is not None:
             if not prediction_filter(row, confidence_threshold):
                 continue
