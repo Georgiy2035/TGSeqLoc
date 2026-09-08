@@ -14,7 +14,11 @@ from tgseqloc.data.v4rl import (
     parse_paddleocr,
     parse_scene_graph,
 )
-from tgseqloc.preparation.v4rl import load_prepared_graph, process_v4rl
+from tgseqloc.preparation.v4rl import (
+    build_preprocess_fingerprint,
+    load_prepared_graph,
+    process_v4rl,
+)
 from tgseqloc.training import Trainer
 
 from tests.helpers import FakeEncoder, make_v4rl_tree
@@ -271,3 +275,51 @@ class V4RLPreparationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OcrFileNameTests(unittest.TestCase):
+    """Выбор распознавателя именем файла, а не отдельным деревом."""
+
+    def _dataset(self, root: Path, names: tuple[str, ...]) -> None:
+        frames = root / "seq1_frames"
+        frames.mkdir(parents=True)
+        (frames / "000000_1465238011340417397.png").write_bytes(b"")
+        for name in names:
+            frame_dir = root / "ocr" / "seq1" / "000000_1465238011340417397"
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            (frame_dir / name).write_text(
+                json.dumps({"image_width": 752, "image_height": 480, "predictions": []}),
+                encoding="utf-8",
+            )
+
+    def test_default_reads_the_paddleocr_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._dataset(root, ("paddleocr_v5.json",))
+            records = discover_v4rl_records(
+                root, str(root / "ocr" / "{sequence}"), str(root / "graphs" / "{sequence}"),
+                ("seq1",), require_inputs=False,
+            )
+            self.assertTrue(str(records[0].ocr_path).endswith("paddleocr_v5.json"))
+
+    def test_another_recognizer_is_selected_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._dataset(root, ("paddleocr_v5.json", "qwen3_vl_4b.json"))
+            records = discover_v4rl_records(
+                root, str(root / "ocr" / "{sequence}"), str(root / "graphs" / "{sequence}"),
+                ("seq1",), require_inputs=False, ocr_file_name="qwen3_vl_4b.json",
+            )
+            self.assertTrue(str(records[0].ocr_path).endswith("qwen3_vl_4b.json"))
+
+    def test_fingerprint_separates_recognizers(self) -> None:
+        """Иначе прогон на Qwen переиспользовал бы графы, собранные на Paddle."""
+
+        base = {"dataset": "v4rl", "sequences": ["seq1"], "chunk_size": 200}
+        first = build_preprocess_fingerprint(
+            {**base, "ocr_file_name": "paddleocr_v5.json"}, {}, {}, 64
+        )
+        second = build_preprocess_fingerprint(
+            {**base, "ocr_file_name": "qwen3_vl_4b.json"}, {}, {}, 64
+        )
+        self.assertNotEqual(first, second)

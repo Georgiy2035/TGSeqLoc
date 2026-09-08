@@ -11,6 +11,11 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from .formats import FrameRecord, FrameText, TextDetection
 
 FRAME_RE = re.compile(r"^(?P<index>\d{6})_(?P<timestamp>\d{19})\.(?:png|jpg|jpeg)$", re.I)
+#: Sidecar name written by the recognizer used for the reported experiments.
+#: Other recognizers write beside it under their own name; see
+#: :func:`discover_v4rl_records`.
+DEFAULT_OCR_FILE_NAME = "paddleocr_v5.json"
+
 DEFAULT_NOOP_TEXTS = frozenset(
     {"", "none", "null", "n/a", "no text", "[no text]", "<no_text>", "<no text>"}
 )
@@ -39,12 +44,19 @@ def discover_v4rl_records(
     chunk_size: int = 200,
     require_inputs: bool = True,
     require_ocr: bool | None = None,
+    ocr_file_name: str = DEFAULT_OCR_FILE_NAME,
 ) -> list[FrameRecord]:
     """Discover ordered frames and their chunked graph/OCR sidecars.
 
     ``require_ocr`` overrides ``require_inputs`` for the OCR sidecar alone:
     when the pipeline runs recognition itself, demanding a file another tool
     was supposed to produce would defeat the point of the stage.
+
+    ``ocr_file_name`` selects which recognizer's sidecar to read. Every
+    recognizer writes the same schema into the same per-frame directory under
+    its own name, so swapping models is a change of file name rather than of
+    directory tree -- which is what lets an OCR ablation reuse one set of
+    scene graphs, splits and ground truth.
     """
 
     records: list[FrameRecord] = []
@@ -61,7 +73,7 @@ def discover_v4rl_records(
             ocr_path = (
                 Path(ocr_root_template.format(sequence=sequence, chunk=chunk))
                 / image_path.stem
-                / "paddleocr_v5.json"
+                / ocr_file_name
             )
             graph_path = (
                 Path(graph_root_template.format(sequence=sequence, chunk=chunk))

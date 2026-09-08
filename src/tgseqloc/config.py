@@ -50,6 +50,10 @@ class DatasetConfig:
     root: Path = Path("data/V4RL")
     sequences: list[str] = field(default_factory=lambda: ["seq1", "seq2"])
     ocr_root_template: str = "data/ocr/{sequence}/chunk_{chunk}"
+    # Which recognizer's sidecar to read. Every recognizer writes the same
+    # schema into the same per-frame directory under its own name, so an OCR
+    # ablation swaps this and reuses one set of graphs, splits and GT.
+    ocr_file_name: str = "paddleocr_v5.json"
     scene_graph_root_template: str = "data/scene_graphs/{sequence}"
     gt_path: Path = Path("data/V4RL/gt/gt_shop_street_1.txt")
     prepared_root: Path = Path("data/prepared")

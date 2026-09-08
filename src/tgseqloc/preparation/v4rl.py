@@ -27,6 +27,7 @@ from tgseqloc.data.v4rl import (
     build_positive_intervals,
     build_temporal_split,
     build_vocabularies,
+    DEFAULT_OCR_FILE_NAME,
     discover_v4rl_records,
     parse_paddleocr,
     parse_scene_graph,
@@ -63,6 +64,7 @@ def _normalize_config(config: Any) -> Any:
         "dataset_root": _get(dataset, "root"),
         "sequences": _get(dataset, "sequences", ("seq1", "seq2")),
         "ocr_root_template": _get(dataset, "ocr_root_template"),
+        "ocr_file_name": _get(dataset, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
         "scene_graph_root_template": _get(dataset, "scene_graph_root_template"),
         "gt_path": _get(dataset, "gt_path"),
         "output_root": _get(dataset, "prepared_root"),
@@ -146,6 +148,9 @@ def build_preprocess_fingerprint(
         "dataset": _get(config, "dataset", "v4rl"),
         "sequences": list(_get(config, "sequences", ("seq1", "seq2"))),
         "chunk_size": int(_get(config, "chunk_size", 200)),
+        # Recorded even though each frame's sidecar is hashed by content: the
+        # manifest should say which recognizer produced the graphs.
+        "ocr_file_name": _get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
         "text_encoder": _get(config, "text_encoder"),
         "text_encoder_revision": _get(config, "text_encoder_revision"),
         "text_embedding_dim": int(text_embedding_dim),
@@ -577,6 +582,7 @@ def process_v4rl(
         sequences,
         chunk_size=int(_get(config, "chunk_size", 200)),
         require_ocr=_get(config, "ocr_stage") is None,
+        ocr_file_name=str(_get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
     )
     corrector = _build_corrector(config, records, ocr_parser, text_filter)
     shuffle_seed = _get(config, "shuffle_text_seed")
@@ -900,6 +906,7 @@ def discover_v4rl_inputs(config: Any) -> int:
         _get(settings, "sequences", ("seq1", "seq2")),
         chunk_size=int(_get(settings, "chunk_size", 200)),
         require_ocr=_get(settings, "ocr_stage") is None,
+        ocr_file_name=str(_get(settings, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
     )
     gt_path = Path(_get(settings, "gt_path"))
     if not gt_path.is_file():
@@ -922,6 +929,7 @@ def discover_v4rl_frames(config: Any) -> list[tuple[str, str, Path]]:
         _get(settings, "sequences", ("seq1", "seq2")),
         chunk_size=int(_get(settings, "chunk_size", 200)),
         require_inputs=False,
+        ocr_file_name=str(_get(settings, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
     )
     return [(r.sequence, r.stem, r.image_path) for r in records]
 
