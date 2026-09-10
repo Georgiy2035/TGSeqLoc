@@ -7,12 +7,21 @@ boxes normalized to the unit square. This module is that translation, and
 nothing else: it does not filter, merge or repair graphs beyond what is needed
 to make a well-formed file.
 
+The object table's columns are read from its own header rather than assumed.
+Two generations of the generator exist side by side: the first wrote
+``{id,name,x1,y1,x2,y2}``, the second -- Gemini 3.1 Flash Lite through
+OpenRouter -- puts ``color`` and ``material`` between the name and the box.
+Locating columns by name reads both, and any column beyond the six the
+pipeline needs is kept on the node as an attribute rather than discarded. A
+graph in the first layout converts to exactly the file it did before.
+
 Two properties of the generator's output shape the code. A small fraction of
-records degenerate into repeated brace fragments instead of a table (0.9% of
-the base split, none of the query split); those are counted and skipped rather
-than half-parsed. And the record names a frame by its position inside a chunk
-of resized images, so recovering the original timestamp -- which is how every
-other stage identifies a frame -- requires the chunk's own ``frame_index.json``.
+records carry no table at all -- repeated brace fragments in the first
+generation (300 of 34,838 base records), empty or failed completions in the
+second (19 of 56,487); those are counted and skipped rather than half-parsed.
+And the record names a frame by its position inside a chunk of resized images,
+so recovering the original timestamp -- which is how every other stage
+identifies a frame -- requires the chunk's own ``frame_index.json``.
 """
 
 from __future__ import annotations
@@ -27,15 +36,21 @@ from typing import Any, Iterable, Iterator
 #: Size the generator was prompted with; boxes come back in these pixels.
 GENERATOR_IMAGE_SIZE = (640.0, 480.0)
 
-_OBJECT_HEADER = re.compile(r"obj\[(\d+)\]\{id,name,x1,y1,x2,y2\}:")
+#: Columns every object row must provide; any others become node attributes.
+REQUIRED_COLUMNS = ("id", "name", "x1", "y1", "x2", "y2")
+
+_OBJECT_HEADER = re.compile(r"obj\[(\d+)\]\{([^}]*)\}:")
 _RELATION_HEADER = re.compile(r"rel\[(\d+)\]\{subj,pred,obj\}:")
-_OBJECT_ROW = re.compile(
-    r"^\s*(\d+)\s*,\s*([^,]+?)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*$"
-)
 _RELATION_ROW = re.compile(r"^\s*(\d+)\s*,\s*([^,]+?)\s*,\s*(\d+)\s*$")
+# The same acceptance as the fixed-layout row pattern these replace, so a
+# graph in the first layout keeps or drops exactly the rows it did before.
+_INTEGER = re.compile(r"^\d+$")
+_NUMBER = re.compile(r"^-?[\d.]+$")
 
 #: Beyond this many braces the output is a repetition loop, not a table.
 _DEGENERATE_BRACES = 50
+
+_LAYOUT_PREFIX = "layout:"
 
 
 @dataclass(slots=True)
@@ -51,6 +66,7 @@ class ConversionStats:
     dropped_boxes: int = 0
     dropped_relations: int = 0
     classes: Counter = field(default_factory=Counter)
+    layouts: Counter = field(default_factory=Counter)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -63,17 +79,25 @@ class ConversionStats:
             "dropped_boxes": self.dropped_boxes,
             "dropped_relations": self.dropped_relations,
             "distinct_classes": len(self.classes),
+            "object_layouts": dict(self.layouts),
         }
 
 
 def parse_scene_graph_text(
-    text: str, image_size: tuple[float, float] = GENERATOR_IMAGE_SIZE
+    text: str | None,
+    image_size: tuple[float, float] = GENERATOR_IMAGE_SIZE,
+    counters: Counter | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
     """Parse one generated graph into normalized nodes and links.
 
-    Returns ``None`` when the output is degenerate or carries no object table,
-    which the caller counts separately -- an empty graph and an unusable one
-    are different failures and should not be summed.
+    Returns ``None`` when the output is degenerate, carries no object table, or
+    its table lacks one of :data:`REQUIRED_COLUMNS`; the caller counts these
+    separately, since an empty graph and an unusable one are different
+    failures and should not be summed.
+
+    ``counters``, when given, receives ``dropped_boxes`` for object rows that
+    did not become nodes, ``dropped_relations`` for relation rows that did not
+    become links, and one ``layout:<columns>`` entry naming the table's header.
     """
 
     if not text or not text.strip():
@@ -83,6 +107,13 @@ def parse_scene_graph_text(
         return None
     if text.count("{") > _DEGENERATE_BRACES:
         return None
+    columns = [column.strip() for column in header.group(2).split(",")]
+    if any(required not in columns for required in REQUIRED_COLUMNS):
+        return None
+    position = {name: columns.index(name) for name in REQUIRED_COLUMNS}
+    extra = [(index, name) for index, name in enumerate(columns) if name not in REQUIRED_COLUMNS]
+    tally = counters if counters is not None else Counter()
+    tally[_LAYOUT_PREFIX + ",".join(columns)] += 1
 
     width, height = image_size
     relation_header = _RELATION_HEADER.search(text)
@@ -91,11 +122,28 @@ def parse_scene_graph_text(
     nodes: list[dict[str, Any]] = []
     index_by_id: dict[int, int] = {}
     for line in object_body.splitlines():
-        row = _OBJECT_ROW.match(line)
-        if row is None:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<"):
             continue
-        identifier = int(row.group(1))
-        x1, y1, x2, y2 = (float(row.group(position)) for position in (3, 4, 5, 6))
+        raw = line.split(",")
+        if len(raw) != len(columns):
+            tally["dropped_boxes"] += 1
+            continue
+        fields = [value.strip() for value in raw]
+        coords = [fields[position[name]] for name in ("x1", "y1", "x2", "y2")]
+        if (
+            not _INTEGER.match(fields[position["id"]])
+            or raw[position["name"]] == ""
+            or not all(_NUMBER.match(value) for value in coords)
+        ):
+            tally["dropped_boxes"] += 1
+            continue
+        try:
+            x1, y1, x2, y2 = (float(value) for value in coords)
+        except ValueError:
+            tally["dropped_boxes"] += 1
+            continue
+        identifier = int(fields[position["id"]])
         x1, x2 = sorted((x1 / width, x2 / width))
         y1, y2 = sorted((y1 / height, y2 / height))
         x1, y1 = max(0.0, x1), max(0.0, y1)
@@ -103,32 +151,35 @@ def parse_scene_graph_text(
         if x2 <= x1 or y2 <= y1:
             # A zero-area box carries no location; keeping it would add a node
             # whose geometry features are meaningless.
+            tally["dropped_boxes"] += 1
             continue
         if identifier in index_by_id:
+            tally["dropped_boxes"] += 1
             continue
         index_by_id[identifier] = len(nodes)
-        nodes.append(
-            {
-                "id": identifier,
-                "data": {
-                    "global_id": identifier,
-                    "class_name": row.group(2).strip() or "unknown",
-                    "bbox_2d": {
-                        "xyxy": [x1, y1, x2, y2],
-                        "center": [(x1 + x2) / 2, (y1 + y2) / 2],
-                    },
-                },
-            }
-        )
+        data: dict[str, Any] = {
+            "global_id": identifier,
+            "class_name": fields[position["name"]] or "unknown",
+            "bbox_2d": {
+                "xyxy": [x1, y1, x2, y2],
+                "center": [(x1 + x2) / 2, (y1 + y2) / 2],
+            },
+        }
+        if extra:
+            data["attributes"] = {name: fields[index] for index, name in extra}
+        nodes.append({"id": identifier, "data": data})
 
     links: list[dict[str, Any]] = []
     if relation_header is not None:
         for line in text[relation_header.end():].splitlines():
             row = _RELATION_ROW.match(line)
             if row is None:
+                if _INTEGER.match(line.split(",")[0].strip()):
+                    tally["dropped_relations"] += 1
                 continue
             source, target = int(row.group(1)), int(row.group(3))
             if source not in index_by_id or target not in index_by_id:
+                tally["dropped_relations"] += 1
                 continue
             links.append(
                 {"source": source, "target": target, "label": row.group(2).strip() or "unknown"}
@@ -189,9 +240,18 @@ def convert_split(
             stats.unknown_frame += 1
             continue
 
-        parsed = parse_scene_graph_text(record.get("predict", ""), image_size)
+        # A failed completion stores null here; it is a missing graph, not a
+        # reason to stop the whole conversion.
+        predict = record.get("predict") or ""
+        tally: Counter = Counter()
+        parsed = parse_scene_graph_text(predict, image_size, tally)
+        stats.dropped_boxes += tally["dropped_boxes"]
+        stats.dropped_relations += tally["dropped_relations"]
+        for key, value in tally.items():
+            if key.startswith(_LAYOUT_PREFIX):
+                stats.layouts[key[len(_LAYOUT_PREFIX):]] += value
         if parsed is None:
-            if record.get("predict", "").count("{") > _DEGENERATE_BRACES:
+            if predict.count("{") > _DEGENERATE_BRACES:
                 stats.degenerate += 1
             else:
                 stats.unparsed += 1
