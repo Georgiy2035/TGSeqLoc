@@ -19,7 +19,12 @@ class TextEncoder(Protocol):
 
 
 class FrozenTextEncoder:
-    """Mean-pooled Hugging Face encoder excluded from graph training."""
+    """Frozen Hugging Face encoder, excluded from graph training.
+
+    ``pooling`` follows the model rather than the pipeline: E5 is trained with
+    mean pooling and BGE-M3 and LaBSE with the CLS token, and using one recipe
+    for all of them would compare pooling choices instead of representations.
+    """
 
     def __init__(
         self,
@@ -29,6 +34,7 @@ class FrozenTextEncoder:
         batch_size: int = 32,
         *,
         prefix: str = "passage: ",
+        pooling: str = "mean",
     ) -> None:
         try:
             from transformers import AutoModel, AutoTokenizer
@@ -40,7 +46,10 @@ class FrozenTextEncoder:
         self.revision = revision
         self.device = torch.device(device)
         self.batch_size = int(batch_size)
+        if pooling not in {"mean", "cls"}:
+            raise ValueError(f"pooling must be 'mean' or 'cls', got {pooling!r}")
         self.prefix = prefix
+        self.pooling = pooling
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
         self.model = AutoModel.from_pretrained(model_name, revision=revision).to(self.device)
         self.model.eval()
@@ -57,6 +66,7 @@ class FrozenTextEncoder:
             "resolved_commit": getattr(self.model.config, "_commit_hash", None),
             "embedding_dim": self.embedding_dim,
             "prefix": self.prefix,
+            "pooling": self.pooling,
         }
 
     @torch.inference_mode()
@@ -75,7 +85,10 @@ class FrozenTextEncoder:
             tokens = {name: value.to(self.device) for name, value in tokens.items()}
             hidden = self.model(**tokens).last_hidden_state
             mask = tokens["attention_mask"].unsqueeze(-1).to(hidden.dtype)
-            pooled = (hidden * mask).sum(1) / mask.sum(1).clamp_min(1)
+            if self.pooling == "cls":
+                pooled = hidden[:, 0]
+            else:
+                pooled = (hidden * mask).sum(1) / mask.sum(1).clamp_min(1)
             batches.append(functional.normalize(pooled, p=2, dim=1).cpu().float())
         return torch.cat(batches)
 
@@ -196,11 +209,11 @@ def build_multilingual_e5(
 ) -> FrozenTextEncoder:
     """Registry factory for the frozen Hugging Face encoder."""
 
-    allowed = {"model_name", "revision", "prefix"}
+    allowed = {"model_name", "revision", "prefix", "pooling"}
     unknown = sorted(set(params) - allowed)
     if unknown:
         raise ValueError(
-            f"unknown multilingual_e5 params: {', '.join(unknown)}; "
+            f"unknown text encoder params: {', '.join(unknown)}; "
             f"supported: {', '.join(sorted(allowed))}"
         )
     return FrozenTextEncoder(device=device, batch_size=batch_size, **params)
