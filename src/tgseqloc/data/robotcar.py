@@ -16,7 +16,7 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from tgseqloc.data.formats import FrameRecord
 
@@ -83,6 +83,27 @@ def load_ins_track(path: str | Path) -> Track:
     )
 
 
+def load_frame_list(path: str | Path) -> frozenset[str]:
+    """Frame stems to keep, one per line; ``role/stem`` is accepted as well.
+
+    An allowlist rather than a stride: which frames an experiment uses has to
+    be written down to be reproduced, and a stride over a directory depends on
+    what the directory happens to hold -- which changed the moment recognition
+    was extended from every eighth frame to all of them. An empty list is an
+    error, not a request for zero frames.
+    """
+
+    stems = set()
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        stems.add(value.rsplit("/", 1)[-1])
+    if not stems:
+        raise ValueError(f"frame list {path} names no frames")
+    return frozenset(stems)
+
+
 def discover_robotcar_records(
     ocr_root_template: str,
     graph_root_template: str,
@@ -91,6 +112,7 @@ def discover_robotcar_records(
     image_path_template: str = "",
     ocr_file_name: str = "paddleocr_v5.json",
     require_inputs: bool = True,
+    frame_list: Collection[str] | None = None,
 ) -> list[FrameRecord]:
     """Frames that carry both a scene graph and recognized text, in time order.
 
@@ -118,6 +140,7 @@ def discover_robotcar_records(
         stems = sorted(
             stem for stem in (p.name for p in ocr_root.iterdir())
             if stem.isdigit() and stem in graphs
+            and (frame_list is None or stem in frame_list)
         )
         for index, stem in enumerate(stems):
             records.append(

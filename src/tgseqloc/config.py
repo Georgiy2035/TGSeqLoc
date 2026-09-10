@@ -60,6 +60,9 @@ class DatasetConfig:
     traversals: dict[str, str] = field(default_factory=dict)
     ins_path_template: str = ""
     image_path_template: str = ""
+    # Which frames the experiment uses, one stem per line. Empty takes every
+    # frame that has both recognized text and a scene graph.
+    frame_list_path: str = ""
     gt_radius_m: float = 25.0
     scene_graph_root_template: str = "data/scene_graphs/{sequence}"
     gt_path: Path = Path("data/V4RL/gt/gt_shop_street_1.txt")

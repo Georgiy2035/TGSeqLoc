@@ -108,5 +108,48 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(split["split_radius_m"], 30.0)
 
 
+class FrameListTests(unittest.TestCase):
+    """Какие кадры входят в эксперимент — записанный список, а не шаг по каталогу."""
+
+    def test_comments_blank_lines_and_role_prefixes(self) -> None:
+        from tgseqloc.data.robotcar import load_frame_list
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "frames.txt"
+            path.write_text("# подмножество\n\n1439388259735205\nquery/1441186652690741\n",
+                            encoding="utf-8")
+            self.assertEqual(load_frame_list(path),
+                             frozenset({"1439388259735205", "1441186652690741"}))
+
+    def test_an_empty_list_is_an_error(self) -> None:
+        """Пустой список означает ошибку в конфиге, а не просьбу о нуле кадров."""
+
+        from tgseqloc.data.robotcar import load_frame_list
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "frames.txt"
+            path.write_text("# пусто\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_frame_list(path)
+
+    def test_discovery_keeps_only_listed_frames_with_contiguous_indices(self) -> None:
+        """Индексы идут подряд: по ним адресуются положительные пары."""
+
+        from tgseqloc.data.robotcar import discover_robotcar_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "graphs" / "base").mkdir(parents=True)
+            for stem in ("100", "200", "300"):
+                (root / "ocr" / "t1" / stem).mkdir(parents=True)
+                (root / "graphs" / "base" / f"{stem}.json").write_text("{}", encoding="utf-8")
+            ocr, graphs = str(root / "ocr" / "{traversal}"), str(root / "graphs" / "{sequence}")
+            everything = discover_robotcar_records(ocr, graphs, {"base": "t1"})
+            listed = discover_robotcar_records(ocr, graphs, {"base": "t1"}, frame_list={"100", "300"})
+            self.assertEqual([r.stem for r in everything], ["100", "200", "300"])
+            self.assertEqual([r.stem for r in listed], ["100", "300"])
+            self.assertEqual([r.index for r in listed], [0, 1])
+
+
 if __name__ == "__main__":
     unittest.main()

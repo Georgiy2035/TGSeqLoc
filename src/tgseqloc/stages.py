@@ -260,7 +260,7 @@ def _discover_frames(config: Any) -> list[tuple[str, str, Path]]:
             chunk_size=config.dataset.chunk_size,
         )
     if adapter == "robotcar":
-        from tgseqloc.data.robotcar import discover_robotcar_records
+        from tgseqloc.data.robotcar import discover_robotcar_records, load_frame_list
 
         return [
             (record.sequence, record.stem, record.image_path)
@@ -270,6 +270,11 @@ def _discover_frames(config: Any) -> list[tuple[str, str, Path]]:
                 dict(config.dataset.traversals),
                 image_path_template=config.dataset.image_path_template,
                 ocr_file_name=config.dataset.ocr_file_name,
+                frame_list=(
+                    load_frame_list(config.dataset.frame_list_path)
+                    if config.dataset.frame_list_path
+                    else None
+                ),
             )
         ]
     raise RuntimeError(f"no frame discovery for dataset adapter {adapter!r}")

@@ -68,6 +68,7 @@ def _normalize_config(config: Any) -> Any:
         "traversals": _get(dataset, "traversals"),
         "ins_path_template": _get(dataset, "ins_path_template"),
         "image_path_template": _get(dataset, "image_path_template"),
+        "frame_list_path": _get(dataset, "frame_list_path"),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
         "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
         "symmetric_scene_edges": bool(_get(preprocess, "symmetric_scene_edges", False)),
@@ -179,6 +180,11 @@ def build_preprocess_fingerprint(
         "backend_identities": backend_identities,
         "source_identities": source_identities,
     }
+    frame_list_path = _get(config, "frame_list_path")
+    if frame_list_path:
+        # Recorded only when set, so the fingerprint of a dataset that uses
+        # every frame stays what it was.
+        payload["frame_list"] = hashlib.sha256(Path(frame_list_path).read_bytes()).hexdigest()
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 

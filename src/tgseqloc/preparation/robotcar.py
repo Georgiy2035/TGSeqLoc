@@ -20,6 +20,7 @@ from tgseqloc.data.robotcar import (
     build_geographic_split,
     build_radius_positives,
     discover_robotcar_records,
+    load_frame_list,
     load_ins_track,
     positions_for,
 )
@@ -36,6 +37,13 @@ def _traversals(config: Any) -> dict[str, str]:
     return {str(role): str(name) for role, name in dict(traversals).items()}
 
 
+def _frame_list(config: Any) -> frozenset[str] | None:
+    """The configured allowlist of frames, or None to take every frame found."""
+
+    path = _get(config, "frame_list_path")
+    return load_frame_list(path) if path else None
+
+
 def discover_robotcar_inputs(config: Any) -> list[FrameRecord]:
     """Frames carrying both a scene graph and recognized text."""
 
@@ -46,6 +54,7 @@ def discover_robotcar_inputs(config: Any) -> list[FrameRecord]:
         _traversals(settings),
         image_path_template=str(_get(settings, "image_path_template", "") or ""),
         ocr_file_name=str(_get(settings, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
+        frame_list=_frame_list(settings),
     )
 
 
