@@ -481,3 +481,52 @@ class SymmetricSceneEdgeTests(unittest.TestCase):
     def test_scene_edges_are_not_marked_as_text_edges(self) -> None:
         graph = self.graph(True)
         self.assertEqual(graph.is_text_edge.tolist(), [False, False])
+
+
+class JunkTextFilterTests(unittest.TestCase):
+    """Обломки распознавания, которые не могут опознать место."""
+
+    TEXTS = ["1", "-", "0", "50", "50%", "GIVE WAY", "ab", "xyz"]
+
+    def _frame(self, root: Path):
+        path = root / "frame.json"
+        path.write_text(json.dumps({
+            "image_width": 100, "image_height": 100,
+            "predictions": [{"bbox": [i, i, 5, 5], "text": t, "confidence": 0.9}
+                            for i, t in enumerate(self.TEXTS)],
+        }), encoding="utf-8")
+        return parse_paddleocr(path)
+
+    def test_off_by_default(self) -> None:
+        from tgseqloc.preparation.v4rl import _drop_junk_text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(list(_drop_junk_text({}, self._frame(Path(tmp))).texts), self.TEXTS)
+
+    def test_short_and_numeric_strings_are_dropped(self) -> None:
+        """На RobotCar именно такие строки встречались на трети маршрута."""
+
+        from tgseqloc.preparation.v4rl import _drop_junk_text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kept = _drop_junk_text({"text_min_length": 3, "text_drop_numeric": True},
+                                   self._frame(Path(tmp)))
+            self.assertEqual(list(kept.texts), ["50%", "GIVE WAY", "xyz"])
+            self.assertEqual(len(kept.boxes), len(kept.texts))
+
+    def test_the_numeric_rule_alone(self) -> None:
+        from tgseqloc.preparation.v4rl import _drop_junk_text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kept = _drop_junk_text({"text_drop_numeric": True}, self._frame(Path(tmp)))
+            self.assertEqual(list(kept.texts), ["-", "50%", "GIVE WAY", "ab", "xyz"])
+
+    def test_fingerprint_unchanged_when_off_and_changed_when_on(self) -> None:
+        """Выключенный фильтр не должен заставлять пересобирать уже готовые данные."""
+
+        base = {"dataset": "v4rl", "sequences": ["seq1"], "chunk_size": 200}
+        plain = build_preprocess_fingerprint(base, {}, {}, 64)
+        off = build_preprocess_fingerprint({**base, "text_min_length": 0, "text_drop_numeric": False}, {}, {}, 64)
+        on = build_preprocess_fingerprint({**base, "text_min_length": 3, "text_drop_numeric": True}, {}, {}, 64)
+        self.assertEqual(plain, off)
+        self.assertNotEqual(plain, on)

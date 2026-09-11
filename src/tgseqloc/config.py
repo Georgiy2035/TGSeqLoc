@@ -148,6 +148,10 @@ class PreprocessConfig:
     connection_strategy: str = "overlap_nearest"
     connection_k: int = 1
     ocr_confidence_threshold: float = 0.0
+    # Drop recognized strings shorter than this many characters; 0 keeps all.
+    text_min_length: int = 0
+    # Drop recognized strings made of digits alone.
+    text_drop_numeric: bool = False
     encoder_batch_size: int = 128
     # Object classes to drop from the graph as ephemeral. Empty keeps every
     # node, which is what V4RL used; RobotCar needs it because half of all
@@ -384,6 +388,8 @@ class AppConfig:
         if self.runtime.num_workers < 0:
             raise ConfigError("runtime.num_workers must be non-negative")
         _validate_device(self.runtime.device)
+        if self.preprocess.text_min_length < 0:
+            raise ConfigError("preprocess.text_min_length must be non-negative")
         if not 0.0 <= self.preprocess.ocr_confidence_threshold <= 1.0:
             raise ConfigError(
                 "preprocess.ocr_confidence_threshold must be in [0, 1]"

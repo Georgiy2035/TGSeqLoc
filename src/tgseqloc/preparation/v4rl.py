@@ -101,6 +101,8 @@ def _normalize_config(config: Any) -> Any:
         "connection_strategy": _get(preprocess, "connection_strategy", "overlap_nearest"),
         "connection_k": _get(preprocess, "connection_k", 1),
         "ocr_confidence_threshold": _get(preprocess, "ocr_confidence_threshold", 0.0),
+        "text_min_length": int(_get(preprocess, "text_min_length", 0) or 0),
+        "text_drop_numeric": bool(_get(preprocess, "text_drop_numeric", False)),
         "encoder_batch_size": _get(preprocess, "encoder_batch_size", 128),
         "frame_batch_size": _get(preprocess, "frame_batch_size", 256),
         "gt_tolerance_ns": _get(preprocess, "gt_tolerance_ns", 50_000_000),
@@ -180,6 +182,12 @@ def build_preprocess_fingerprint(
         "backend_identities": backend_identities,
         "source_identities": source_identities,
     }
+    min_length = int(_get(config, "text_min_length", 0) or 0)
+    drop_numeric = bool(_get(config, "text_drop_numeric", False))
+    if min_length > 0 or drop_numeric:
+        # Recorded only when enabled, so data prepared without the filter
+        # keeps its fingerprint.
+        payload["text_junk_filter"] = {"min_length": min_length, "drop_numeric": drop_numeric}
     frame_list_path = _get(config, "frame_list_path")
     if frame_list_path:
         # Recorded only when set, so the fingerprint of a dataset that uses
@@ -415,22 +423,56 @@ def _frame_text(
     ocr_parser: Callable[..., FrameText],
     text_filter: Callable[..., bool] | None,
 ) -> FrameText:
-    """Recognized text for one frame, from the cached stage or the parser."""
+    """Recognized text for one frame, from the cached stage or the parser.
+
+    Debris is removed here, in the one place every path goes through, so a
+    parsed sidecar, a stage artifact and the shuffled control's pool all see
+    the same strings.
+    """
 
     stage = _get(config, "ocr_stage")
     if stage is None:
-        return ocr_parser(
+        frame_text = ocr_parser(
             record.ocr_path,
             float(_get(config, "ocr_confidence_threshold", 0.0)),
             noop_texts=_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS),
             prediction_filter=text_filter,
         )
+        return _drop_junk_text(config, frame_text)
     from tgseqloc.stages import read_stage, stage_root
 
     root = stage_root(
         _get(config, "prepared_root"), _get(config, "dataset", "v4rl"), "ocr"
     )
-    return read_stage("ocr", root, record.sequence, record.stem)
+    return _drop_junk_text(config, read_stage("ocr", root, record.sequence, record.stem))
+
+
+def _drop_junk_text(config: Any, frame_text: FrameText) -> FrameText:
+    """Remove recognition debris that cannot identify a place.
+
+    Strings shorter than ``text_min_length`` and, with ``text_drop_numeric``,
+    strings of digits alone are dropped. On Oxford RobotCar the most frequent
+    strings left after dynamic filtering were single characters -- ``1`` on 36
+    of 108 route segments, ``-`` on 32, ``0`` on 29. Every occurrence encodes to
+    the same vector, so each pulled a query towards any frame carrying the same
+    debris: queries with text fell to R@5 9.6 against 55.7 without it, and
+    real text scored no better than shuffled text.
+
+    The rule is the one the text-density analysis applied to every dataset from
+    the start, moved into the pipeline. The recognizer's confidence is left out
+    on purpose: recognizers report it on different scales and one reports none,
+    so a shared threshold would bias any comparison between them.
+    """
+
+    min_length = int(_get(config, "text_min_length", 0) or 0)
+    drop_numeric = bool(_get(config, "text_drop_numeric", False))
+    if (min_length <= 0 and not drop_numeric) or not frame_text.detections:
+        return frame_text
+    keep = []
+    for detection in frame_text.detections:
+        value = detection.text.strip()
+        keep.append(not (len(value) < min_length or (drop_numeric and value.isdigit())))
+    return frame_text.select(keep)
 
 
 def _drop_dynamic_text(
