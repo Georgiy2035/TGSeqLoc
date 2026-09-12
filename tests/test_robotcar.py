@@ -84,15 +84,38 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(split["excluded_test_indices"], [9])
         self.assertEqual(split["test_query_indices"], [8])
 
-    def test_validation_is_taken_from_the_training_segment(self) -> None:
+    def test_validation_is_its_own_segment_between_training_and_test(self) -> None:
         positions = {i: (float(i * 100), 0.0) for i in range(20)}
         positives = {i: [0] for i in positions}
         split = build_geographic_split(positions, positives, test_ratio=0.2,
-                                       validation_ratio=0.25, radius=25.0)
-        self.assertTrue(set(split["validation_query_indices"]).isdisjoint(
-            split["test_query_indices"]))
-        self.assertTrue(set(split["train_query_indices"]).isdisjoint(
-            split["validation_query_indices"]))
+                                       validation_ratio=0.2, radius=25.0)
+        train, validation, test = (split[f"{part}_query_indices"]
+                                   for part in ("train", "validation", "test"))
+        self.assertEqual(train, list(range(12)))
+        self.assertEqual(validation, [12, 13, 14, 15])
+        self.assertEqual(test, [16, 17, 18, 19])
+        self.assertTrue(set(train).isdisjoint(validation))
+        self.assertTrue(set(validation).isdisjoint(test))
+
+    def test_a_revisit_is_dropped_from_validation_too(self) -> None:
+        """Валидация выбирает эпоху, поэтому её отделяют тем же правилом, что и тест."""
+
+        positions = {i: (float(i * 100), 0.0) for i in range(20)}
+        positions[13] = (500.0, 0.0)   # возврат на землю обучения
+        positions[17] = (1400.0, 0.0)  # возврат на землю валидации
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.2, radius=25.0)
+        self.assertEqual(split["excluded_validation_indices"], [13])
+        self.assertEqual(split["excluded_test_indices"], [17])
+        self.assertNotIn(13, split["validation_query_indices"])
+        self.assertNotIn(17, split["test_query_indices"])
+
+    def test_ratios_must_leave_room_for_training(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        with self.assertRaises(ValueError):
+            build_geographic_split(positions, {i: [0] for i in positions},
+                                   test_ratio=0.6, validation_ratio=0.4, radius=25.0)
 
     def test_queries_without_positives_are_not_scored(self) -> None:
         positions = {i: (float(i * 100), 0.0) for i in range(10)}

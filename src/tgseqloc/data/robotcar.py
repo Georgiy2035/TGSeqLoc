@@ -214,9 +214,16 @@ def build_geographic_split(
 
     Cutting the query sequence by time almost separates places, because the
     vehicle drives a route -- but only almost: it revisits, and a handful of
-    late frames land back on early ground. Those are dropped from the test set
-    rather than left in, so that no test query can be answered from a place the
-    model was trained on.
+    late frames land back on early ground. Those are dropped rather than left
+    in, so that no held-out query can be answered from a place the model was
+    trained on.
+
+    Validation is a segment of its own, held to the same rule as the test set.
+    It used to be the tail of the training block, which left it up against
+    training ground -- 9 metres away on the RobotCar route -- and on a stretch
+    of the route whose text density was three times the test set's. The epoch
+    is chosen by validation recall, so a validation set that overlaps training
+    and misrepresents the very signal under ablation chooses the wrong epoch.
     """
 
     ordered = sorted(query_positions)
@@ -225,34 +232,43 @@ def build_geographic_split(
     if not 0 < test_ratio < 1 or not 0 <= validation_ratio < 1:
         raise ValueError("split ratios must satisfy 0 < test < 1 and 0 <= validation < 1")
 
-    cut = int(len(ordered) * (1 - test_ratio))
-    before, after = ordered[:cut], ordered[cut:]
-    train_points = [query_positions[index] for index in before]
+    if test_ratio + validation_ratio >= 1:
+        raise ValueError("test and validation ratios must leave room for training")
 
-    kept, leaked = [], []
-    for index in after:
-        position = query_positions[index]
-        if any(math.dist(position, point) <= radius for point in train_points):
-            leaked.append(index)
-        else:
-            kept.append(index)
+    total = len(ordered)
+    test_cut = int(total * (1 - test_ratio))
+    validation_cut = int(total * (1 - test_ratio - validation_ratio))
+    train_block = ordered[:validation_cut]
+    validation_block = ordered[validation_cut:test_cut]
+    test_block = ordered[test_cut:]
 
-    annotated_before = [index for index in before if positives.get(index)]
-    validation_count = (
-        min(len(annotated_before), max(1, int(len(annotated_before) * validation_ratio)))
-        if validation_ratio
-        else 0
-    )
-    train = annotated_before[:-validation_count] if validation_count else annotated_before
-    validation = annotated_before[-validation_count:] if validation_count else []
-    test = [index for index in kept if positives.get(index)]
+    def separate(block, reference):
+        """Keep only frames further than ``radius`` from every reference point."""
+
+        kept, leaked = [], []
+        for index in block:
+            position = query_positions[index]
+            if any(math.dist(position, point) <= radius for point in reference):
+                leaked.append(index)
+            else:
+                kept.append(index)
+        return kept, leaked
+
+    train_points = [query_positions[index] for index in train_block]
+    validation_kept, validation_leaked = separate(validation_block, train_points)
+    held_out_points = train_points + [query_positions[index] for index in validation_kept]
+    test_kept, test_leaked = separate(test_block, held_out_points)
+
+    scored = lambda block: [index for index in block if positives.get(index)]
     return {
         "positives": {int(k): [int(v) for v in values] for k, values in positives.items()},
-        "train_query_indices": train,
-        "validation_query_indices": validation,
-        "test_query_indices": test,
-        "test_start": ordered[cut] if cut < len(ordered) else len(ordered),
-        "excluded_test_indices": leaked,
+        "train_query_indices": scored(train_block),
+        "validation_query_indices": scored(validation_kept),
+        "test_query_indices": scored(test_kept),
+        "test_start": ordered[test_cut] if test_cut < total else total,
+        "validation_start": ordered[validation_cut] if validation_cut < total else total,
+        "excluded_test_indices": test_leaked,
+        "excluded_validation_indices": validation_leaked,
         "split_radius_m": float(radius),
     }
 
