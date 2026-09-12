@@ -63,6 +63,9 @@ class DatasetConfig:
     # Which frames the experiment uses, one stem per line. Empty takes every
     # frame that has both recognized text and a scene graph.
     frame_list_path: str = ""
+    # Written block cross-validation assignment; empty means a single time cut.
+    split_folds_path: str = ""
+    split_fold: int = -1
     gt_radius_m: float = 25.0
     scene_graph_root_template: str = "data/scene_graphs/{sequence}"
     gt_path: Path = Path("data/V4RL/gt/gt_shop_street_1.txt")
@@ -390,6 +393,8 @@ class AppConfig:
         _validate_device(self.runtime.device)
         if self.preprocess.text_min_length < 0:
             raise ConfigError("preprocess.text_min_length must be non-negative")
+        if self.dataset.split_folds_path and self.dataset.split_fold < 0:
+            raise ConfigError("dataset.split_fold must be set with dataset.split_folds_path")
         if not 0.0 <= self.preprocess.ocr_confidence_threshold <= 1.0:
             raise ConfigError(
                 "preprocess.ocr_confidence_threshold must be in [0, 1]"

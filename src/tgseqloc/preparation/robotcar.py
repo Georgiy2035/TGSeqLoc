@@ -18,6 +18,7 @@ from tgseqloc.data.formats import FrameRecord
 from tgseqloc.data.robotcar import (
     DEFAULT_RADIUS_M,
     build_geographic_split,
+    load_fold_split,
     build_radius_positives,
     discover_robotcar_records,
     load_frame_list,
@@ -86,13 +87,23 @@ def write_robotcar_split(
     }
 
     positives = build_radius_positives(positions[query], positions[reference], radius)
-    split = build_geographic_split(
-        positions[query],
-        positives,
-        test_ratio=float(_get(settings, "test_ratio", 0.2)),
-        validation_ratio=float(_get(settings, "validation_ratio", 0.1)),
-        radius=radius,
-    )
+    folds_path = str(_get(settings, "split_folds_path", "") or "")
+    if folds_path:
+        index_by_stem = {record.stem: record.index for record in by_sequence[query]}
+        split = load_fold_split(
+            json.loads(Path(folds_path).read_text(encoding="utf-8")),
+            int(_get(settings, "split_fold", -1)),
+            index_by_stem,
+            positives,
+        )
+    else:
+        split = build_geographic_split(
+            positions[query],
+            positives,
+            test_ratio=float(_get(settings, "test_ratio", 0.2)),
+            validation_ratio=float(_get(settings, "validation_ratio", 0.1)),
+            radius=radius,
+        )
     split["database_paths"] = [
         f"{record.sequence}/{record.stem}.pt" for record in by_sequence[reference]
     ]

@@ -69,6 +69,8 @@ def _normalize_config(config: Any) -> Any:
         "ins_path_template": _get(dataset, "ins_path_template"),
         "image_path_template": _get(dataset, "image_path_template"),
         "frame_list_path": _get(dataset, "frame_list_path"),
+        "split_folds_path": _get(dataset, "split_folds_path", ""),
+        "split_fold": int(_get(dataset, "split_fold", -1)),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
         "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
         "symmetric_scene_edges": bool(_get(preprocess, "symmetric_scene_edges", False)),

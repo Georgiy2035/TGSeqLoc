@@ -176,3 +176,63 @@ class FrameListTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FoldSplitTests(unittest.TestCase):
+    """Разбиение, прочитанное из готовой разметки: оно обязано быть одним для всех веток."""
+
+    ASSIGNMENT = {
+        "folds": 2, "block_length_m": 200.0, "radius_m": 25.0,
+        "density_reference": "rcgf_real_qwen",
+        "assignment": {
+            "0": {"train": ["a", "b"], "validation": ["c"], "test": ["d", "e"]},
+            "1": {"train": ["d", "e"], "validation": ["a"], "test": ["b", "c"]},
+        },
+    }
+    INDEX = {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4}
+
+    def test_parts_come_from_the_written_assignment(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        split = load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {i: [0] for i in range(5)})
+        self.assertEqual(split["train_query_indices"], [0, 1])
+        self.assertEqual(split["validation_query_indices"], [2])
+        self.assertEqual(split["test_query_indices"], [3, 4])
+        self.assertEqual(split["split_fold"], 0)
+        self.assertEqual(split["split_radius_m"], 25.0)
+        self.assertEqual(split["split_density_reference"], "rcgf_real_qwen")
+
+    def test_each_fold_tests_its_own_blocks(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        first = load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {i: [0] for i in range(5)})
+        second = load_fold_split(self.ASSIGNMENT, 1, self.INDEX, {i: [0] for i in range(5)})
+        self.assertTrue(set(first["test_query_indices"]).isdisjoint(second["test_query_indices"]))
+
+    def test_a_frame_outside_this_run_is_counted_not_silently_kept(self) -> None:
+        """Список кадров прогона может быть уже разметки; молча терять их нельзя."""
+
+        from tgseqloc.data.robotcar import load_fold_split
+
+        index = {"a": 0, "b": 1, "c": 2, "d": 3}
+        split = load_fold_split(self.ASSIGNMENT, 0, index, {i: [0] for i in range(4)})
+        self.assertEqual(split["test_query_indices"], [3])
+        self.assertEqual(split["frames_not_in_this_run"], 1)
+
+    def test_queries_without_positives_are_not_scored(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        split = load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {0: [0], 1: [0], 2: [0], 3: [0]})
+        self.assertEqual(split["test_query_indices"], [3])
+
+    def test_an_unknown_fold_is_an_error(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        with self.assertRaises(ValueError):
+            load_fold_split(self.ASSIGNMENT, 7, self.INDEX, {i: [0] for i in range(5)})
+
+    def test_an_empty_test_set_is_an_error(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        with self.assertRaises(RuntimeError):
+            load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {0: [0], 1: [0], 2: [0]})

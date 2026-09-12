@@ -202,6 +202,54 @@ def build_radius_positives(
     return positives
 
 
+def load_fold_split(
+    assignment: Mapping[str, Any],
+    fold: int,
+    index_by_stem: Mapping[str, int],
+    positives: Mapping[int, Sequence[int]],
+) -> dict[str, Any]:
+    """Train, validation and test taken from a written fold assignment.
+
+    Blocks of route, which fold each belongs to and the guard bands between
+    them are decided once, offline, from a single reference recognizer, and
+    written to a file. Every arm then reads that same file, so the split cannot
+    drift with the text an arm happens to find -- which is what makes a paired
+    comparison between arms mean anything. A cut computed per arm would give
+    the recognizer that reads more text a different test set.
+    """
+
+    folds = assignment.get("assignment") or {}
+    part_stems = folds.get(str(int(fold)))
+    if part_stems is None:
+        raise ValueError(f"fold {fold} is not in the assignment ({sorted(folds)})")
+    parts: dict[str, list[int]] = {}
+    unknown = 0
+    for part in ("train", "validation", "test"):
+        indices = []
+        for stem in part_stems.get(part, ()):
+            index = index_by_stem.get(str(stem))
+            if index is None:
+                unknown += 1
+                continue
+            if positives.get(index):
+                indices.append(index)
+        parts[part] = sorted(indices)
+    if not parts["train"] or not parts["test"]:
+        raise RuntimeError(f"fold {fold} left an empty train or test set")
+    return {
+        "positives": {int(k): [int(v) for v in values] for k, values in positives.items()},
+        "train_query_indices": parts["train"],
+        "validation_query_indices": parts["validation"],
+        "test_query_indices": parts["test"],
+        "split_fold": int(fold),
+        "split_folds": int(assignment.get("folds", 0)),
+        "split_block_length_m": float(assignment.get("block_length_m", 0.0)),
+        "split_radius_m": float(assignment.get("radius_m", 0.0)),
+        "split_density_reference": str(assignment.get("density_reference", "")),
+        "frames_not_in_this_run": unknown,
+    }
+
+
 def build_geographic_split(
     query_positions: Mapping[int, tuple[float, float]],
     positives: Mapping[int, Sequence[int]],
