@@ -30,14 +30,17 @@ class GATGraphEncoder(nn.Module):
         use_edge_geometry: bool = False,
         text_fusion: str = "node",
         text_dropout: float = 0.0,
+        text_centering: bool = False,
     ) -> None:
         super().__init__()
         if n_layers < 1:
             raise ValueError("n_layers must be at least one")
         if use_text_nodes and num_node_classes is None:
             raise ValueError("text nodes require num_node_classes")
-        if text_fusion not in ("node", "additive"):
-            raise ValueError(f"text_fusion must be 'node' or 'additive', got {text_fusion!r}")
+        if text_fusion not in ("node", "additive", "set"):
+            raise ValueError(
+                f"text_fusion must be 'node', 'additive' or 'set', got {text_fusion!r}"
+            )
         if not 0.0 <= float(text_dropout) < 1.0:
             raise ValueError("text_dropout must be in [0, 1)")
         self.use_node_class = num_node_classes is not None
@@ -48,6 +51,7 @@ class GATGraphEncoder(nn.Module):
         self.edge_cont_dim = int(edge_cont_dim)
         self.text_fusion = str(text_fusion)
         self.text_dropout = float(text_dropout)
+        self.text_centering = bool(text_centering)
         self.init_args = {
             "in_dim": int(in_dim),
             "hidden_dim": int(hidden_dim),
@@ -69,6 +73,8 @@ class GATGraphEncoder(nn.Module):
             # arguments it was saved with and still loads.
             self.init_args["text_fusion"] = self.text_fusion
             self.init_args["text_dropout"] = self.text_dropout
+        if self.text_centering:
+            self.init_args["text_centering"] = True
 
         self.node_emb = (
             nn.Embedding(num_node_classes, node_emb_dim)
@@ -152,6 +158,24 @@ class GATGraphEncoder(nn.Module):
             if self.use_text_nodes and self.text_fusion == "additive"
             else None
         )
+        # The set form, created after everything else for the same reason as the
+        # additive term: every scene weight is drawn as in a model without text.
+        set_form = self.use_text_nodes and self.text_fusion == "set"
+        self.text_mlp = (
+            nn.Sequential(
+                nn.Linear(text_emb_dim + in_dim + node_emb_dim, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            if set_form
+            else None
+        )
+        # No bias: a frame without strings must add exactly nothing.
+        self.text_out = nn.Linear(hidden_dim, proj_dim, bias=False) if set_form else None
+        if set_form:
+            self.register_buffer("text_center", torch.zeros(text_emb_dim))
+        else:
+            self.text_center = None
 
     @staticmethod
     def _indices(values: Tensor, size: int, name: str, device: torch.device) -> Tensor:
@@ -238,6 +262,8 @@ class GATGraphEncoder(nn.Module):
         edge_index = batch.edge_index.to(device=x.device, dtype=torch.long)
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
             raise ValueError("edge_index must have shape [2, edges]")
+        if self.text_mlp is not None:
+            return self._forward_set(batch, x, edge_index, return_attn)
         if self.text_add is not None:
             return self._forward_additive(batch, x, edge_index, return_attn)
         h = self.input_mlp(self._node_features(batch, x))
@@ -354,6 +380,107 @@ class GATGraphEncoder(nn.Module):
             dim=1,
         )
         descriptor = F.normalize(self.proj(pooled), p=2, dim=1)
+        return (descriptor, attention) if return_attn else descriptor
+
+    def _forward_set(self, batch, x: Tensor, edge_index: Tensor, return_attn: bool):
+        """Scene graph over objects, and the strings of the frame as a set.
+
+        ``descriptor = normalize(P_scene(pool(objects)) + P_text(sum_i phi(text_i)))``
+
+        Each string is encoded on its own from its embedding, its box and the
+        class of the object it is written on, and the strings of a frame are
+        summed only after that nonlinear encoding. Several signs on one facade
+        therefore stay a set: in the additive form a linear term summed them
+        into one vector, and two strings could not be told from their sum.
+
+        The scene part is computed over objects alone, exactly as in a model
+        without text, and a frame without strings adds an empty sum, so such a
+        frame gets precisely the text-free descriptor. The strings' embeddings
+        are centred on the mean string of the training data, so that an
+        unremarkable string starts close to adding nothing.
+        """
+
+        is_text = getattr(batch, "is_text", None)
+        text_emb = getattr(batch, "text_emb", None)
+        if is_text is None or text_emb is None:
+            raise ValueError("text_fusion='set' requires is_text and text_emb")
+        is_text = is_text.to(device=x.device, dtype=torch.bool).reshape(-1)
+        text_emb = text_emb.to(device=x.device, dtype=x.dtype)
+        if is_text.numel() != x.shape[0]:
+            raise ValueError("is_text must contain one value per node")
+        if tuple(text_emb.shape) != (x.shape[0], self.text_emb_dim):
+            raise ValueError(
+                f"text_emb must have shape ({x.shape[0]}, {self.text_emb_dim})"
+            )
+        edge_count = edge_index.shape[1]
+        text_edge = getattr(batch, "is_text_edge", None)
+        if text_edge is None:
+            text_edge = is_text[edge_index[0]] | is_text[edge_index[1]]
+        else:
+            text_edge = text_edge.to(device=x.device, dtype=torch.bool).reshape(-1)
+            if text_edge.numel() != edge_count:
+                raise ValueError("is_text_edge must contain one value per edge")
+
+        features = self._node_features(batch, x)
+        in_dim = x.shape[1]
+        scene = ~is_text
+        edge_attr = self._edge_features(batch, x, edge_count)
+        scene_edge = scene[edge_index[0]] & scene[edge_index[1]] & ~text_edge
+        remap = torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
+        remap[scene] = torch.arange(int(scene.sum()), device=x.device)
+        scene_index = remap[edge_index[:, scene_edge]]
+        scene_attr = edge_attr[scene_edge]
+
+        h = self.input_mlp(features[scene])
+        attention = None
+        for index, conv in enumerate(self.convs):
+            if return_attn and index == len(self.convs) - 1:
+                h, attention = conv(
+                    h, scene_index, scene_attr, return_attention_weights=True
+                )
+            else:
+                h = conv(h, scene_index, scene_attr)
+            h = self.dropout(self.activation(h))
+
+        graph_index = getattr(batch, "batch", None)
+        if graph_index is None:
+            graph_index = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+            graphs = 1
+        else:
+            graph_index = graph_index.to(x.device)
+            graphs = int(getattr(batch, "num_graphs", int(graph_index.max()) + 1))
+        scene_graph_index = graph_index[scene]
+        pooled = torch.cat(
+            (
+                global_mean_pool(h, scene_graph_index, size=graphs),
+                global_max_pool(h, scene_graph_index, size=graphs),
+            ),
+            dim=1,
+        )
+        descriptor = self.proj(pooled)
+
+        link = text_edge & is_text[edge_index[0]] & ~is_text[edge_index[1]]
+        if bool(link.any()):
+            assert self.text_mlp is not None and self.text_out is not None
+            strings = edge_index[0, link]
+            objects = edge_index[1, link]
+            element = torch.cat(
+                (
+                    text_emb[strings] - self.text_center,
+                    x[strings],
+                    features[objects, in_dim:],
+                ),
+                dim=1,
+            )
+            encoded = self.text_mlp(element)
+            if self.training and self.text_dropout > 0:
+                keep = torch.rand(encoded.shape[0], 1, device=x.device) >= self.text_dropout
+                encoded = encoded * keep.to(encoded.dtype)
+            per_frame = scatter(
+                encoded, graph_index[strings], dim=0, dim_size=graphs, reduce="sum"
+            )
+            descriptor = descriptor + self.text_out(per_frame)
+        descriptor = F.normalize(descriptor, p=2, dim=1)
         return (descriptor, attention) if return_attn else descriptor
 
     @property

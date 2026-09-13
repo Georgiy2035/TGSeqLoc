@@ -382,6 +382,29 @@ def negative_exclusions(
     return build_radius_positives(queries, database, float(radius))
 
 
+def text_center_from_graphs(graphs, text_emb_dim: int) -> torch.Tensor:
+    """Mean embedding of every string in ``graphs``; zeros when there is none."""
+
+    total = torch.zeros(int(text_emb_dim), dtype=torch.float64)
+    count = 0
+    for graph in graphs:
+        is_text = getattr(graph, "is_text", None)
+        embeddings = getattr(graph, "text_emb", None)
+        if is_text is None or embeddings is None:
+            continue
+        rows = embeddings[is_text.bool().reshape(-1)]
+        if rows.numel():
+            total += rows.double().sum(dim=0)
+            count += int(rows.shape[0])
+    return (total / count).float() if count else total.float()
+
+
+def fit_text_center(paths: Sequence[str | Path], edge_attr_dim: int, text_emb_dim: int) -> torch.Tensor:
+    return text_center_from_graphs(
+        (load_graph(path, edge_attr_dim=edge_attr_dim) for path in paths), text_emb_dim
+    )
+
+
 class Trainer:
     """End-to-end graph descriptor trainer for prepared TGSeqLoc data."""
 
@@ -940,8 +963,14 @@ class Trainer:
                 self._normalizer_paths(),
                 self.edge_attr_dim,
                 _get(self.config, "normalization.log_indices", default=None),
-                exclude_text_edges=getattr(self.model, "text_add", None) is not None,
+                exclude_text_edges=getattr(self.model, "text_fusion", "node") != "node",
             )
+            if getattr(self.model, "text_centering", False) and getattr(self.model, "text_center", None) is not None:
+                self.model.text_center.copy_(
+                    fit_text_center(
+                        self._normalizer_paths(), self.edge_attr_dim, self.text_emb_dim
+                    ).to(self.model.text_center.device)
+                )
 
         negatives_per_query = int(
             self._training_value("negatives_per_query", 2)
