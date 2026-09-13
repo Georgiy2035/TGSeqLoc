@@ -357,6 +357,31 @@ def fit_edge_normalizer(
     return normalizer.finalize()
 
 
+def negative_exclusions(
+    split: Mapping[str, Any], query_indices: Sequence[int], radius: float
+) -> dict[int, list[int]]:
+    """Database frames too close to each query to be taken as its negatives.
+
+    Positives lie within the ground-truth radius; everything within ``radius``
+    is kept out of the negatives as well, so that the frames in between take no
+    part in training. Metric positions must be recorded in the split.
+    """
+
+    query_positions = split.get("query_positions")
+    database_positions = split.get("database_positions")
+    if not query_positions or not database_positions:
+        raise ValueError(
+            "training.negative_min_distance_m needs metric positions in the prepared "
+            "split; run prepare again with this configuration"
+        )
+    from tgseqloc.data.robotcar import build_radius_positives
+
+    wanted = {int(index) for index in query_indices}
+    queries = {int(k): (float(v[0]), float(v[1])) for k, v in query_positions.items() if int(k) in wanted}
+    database = {int(k): (float(v[0]), float(v[1])) for k, v in database_positions.items()}
+    return build_radius_positives(queries, database, float(radius))
+
+
 class Trainer:
     """End-to-end graph descriptor trainer for prepared TGSeqLoc data."""
 
@@ -950,6 +975,10 @@ class Trainer:
         patience = int(self._training_value("patience", 7))
         no_improvement = 0
         history = []
+        buffer = float(self._training_value("negative_min_distance_m", 0.0) or 0.0)
+        exclusions = (
+            negative_exclusions(self.split, dataset.query_indices, buffer) if buffer > 0 else None
+        )
         for epoch in range(self.start_epoch, epochs + 1):
             database_embeddings = self._encode(self.database_paths)
             query_embeddings = self._encode(
@@ -963,6 +992,7 @@ class Trainer:
                 negatives_per_query,
                 int(self._training_value("hard_search_depth", 256)),
                 seed + epoch,
+                **({"exclusions": exclusions} if exclusions is not None else {}),
             )
             dataset.set_epoch(epoch)
             dataset.set_hard_negatives(hard)

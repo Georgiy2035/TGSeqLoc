@@ -219,6 +219,9 @@ class TrainingConfig:
     margin: float = 0.3
     negatives_per_query: int = 2
     hard_search_depth: int = 256
+    # Keep database frames closer than this many metres out of a query's
+    # negatives; 0 leaves only the positives out, as before.
+    negative_min_distance_m: float = 0.0
     max_grad_norm: float = 5.0
     miner: str = "hard_negative"
     recall_values: list[int] = field(default_factory=lambda: [1, 5, 10])
@@ -405,6 +408,8 @@ class AppConfig:
             raise ConfigError("model.text_fusion must be 'node' or 'additive'")
         if not 0.0 <= self.model.text_dropout < 1.0:
             raise ConfigError("model.text_dropout must be in [0, 1)")
+        if not 0.0 <= self.training.negative_min_distance_m < float("inf"):
+            raise ConfigError("training.negative_min_distance_m must be a non-negative number")
         if not 0.0 <= self.preprocess.ocr_confidence_threshold <= 1.0:
             raise ConfigError(
                 "preprocess.ocr_confidence_threshold must be in [0, 1]"

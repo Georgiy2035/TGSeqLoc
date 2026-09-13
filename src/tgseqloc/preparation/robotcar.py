@@ -112,6 +112,14 @@ def write_robotcar_split(
     ]
     split["reference_sequence"] = reference
     split["query_sequence"] = query
+    # Metric positions travel with the split, so that training can keep frames
+    # that are almost positives out of the negatives without the INS logs.
+    split["query_positions"] = {
+        str(index): [float(p[0]), float(p[1])] for index, p in positions[query].items()
+    }
+    split["database_positions"] = {
+        str(index): [float(p[0]), float(p[1])] for index, p in positions[reference].items()
+    }
     split["frames_without_position"] = unplaced
     split["queries_without_positives"] = sum(
         1 for index in positions[query] if not positives.get(index)

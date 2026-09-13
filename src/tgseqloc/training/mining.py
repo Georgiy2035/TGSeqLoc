@@ -26,6 +26,7 @@ def mine_hard_negatives(
     negatives_per_query: int,
     search_depth: int = 256,
     seed: int = 0,
+    exclusions: Mapping[int, Sequence[int]] | None = None,
 ) -> dict[int, list[int]]:
     """Mine nearest non-positive database items using cosine similarity.
 
@@ -63,6 +64,11 @@ def mine_hard_negatives(
             query_index, positives.get(str(query_index), ())  # type: ignore[arg-type]
         )
         positive_set = {int(value) for value in positive_values}
+        if exclusions is not None:
+            # Frames recorded just beyond the positive radius look almost like the
+            # positives; taking them as negatives would teach the model that the
+            # same street, and the same sign, belong to different places.
+            positive_set |= {int(value) for value in exclusions.get(query_index, ())}
         selected = [
             int(candidate)
             for candidate in nearest[row]
