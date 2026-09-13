@@ -225,6 +225,10 @@ class TrainingConfig:
     # Keep database frames closer than this many metres out of a query's
     # negatives; 0 leaves only the positives out, as before.
     negative_min_distance_m: float = 0.0
+    # Train only on positives within this many metres (0: the whole ground
+    # truth). Frames between it and the ground-truth radius are left out of
+    # training; evaluation still uses the whole ground truth.
+    positive_max_distance_m: float = 0.0
     max_grad_norm: float = 5.0
     miner: str = "hard_negative"
     recall_values: list[int] = field(default_factory=lambda: [1, 5, 10])
@@ -413,6 +417,10 @@ class AppConfig:
             raise ConfigError("model.text_dropout must be in [0, 1)")
         if not 0.0 <= self.training.negative_min_distance_m < float("inf"):
             raise ConfigError("training.negative_min_distance_m must be a non-negative number")
+        if self.training.positive_max_distance_m < 0:
+            raise ConfigError("training.positive_max_distance_m must be non-negative")
+        if self.training.positive_max_distance_m > self.dataset.gt_radius_m:
+            raise ConfigError("training.positive_max_distance_m cannot exceed dataset.gt_radius_m")
         if not 0.0 <= self.preprocess.ocr_confidence_threshold <= 1.0:
             raise ConfigError(
                 "preprocess.ocr_confidence_threshold must be in [0, 1]"

@@ -163,6 +163,7 @@ class TripletGraphDataset(Dataset):
         text_emb_dim: int | None = None,
         seed: int = 0,
         edge_attr_dim: int | None = None,
+        ignored: Mapping[int, Sequence[int]] | Mapping[str, Sequence[int]] | None = None,
     ) -> None:
         if negatives_per_query < 1:
             raise ValueError("negatives_per_query must be positive")
@@ -179,11 +180,21 @@ class TripletGraphDataset(Dataset):
         self.seed = int(seed)
         self.epoch = 0
         self.hard_negatives: dict[int, list[int]] = {}
+        # Frames near enough to count as correct at evaluation but too far to be
+        # trained as positives: neither pulled in nor pushed away.
+        self.ignored = (
+            None
+            if ignored is None
+            else {int(k): [int(v) for v in values] for k, values in ignored.items()}
+        )
         self.query_indices = []
         for query_index in map(int, query_indices):
             positive = set(self.positives.get(query_index, ()))
+            blocked = positive
+            if self.ignored is not None:
+                blocked = positive | set(self.ignored.get(query_index, ()))
             if positive and any(
-                index not in positive for index in range(len(self.database_paths))
+                index not in blocked for index in range(len(self.database_paths))
             ):
                 self.query_indices.append(query_index)
 
@@ -211,16 +222,19 @@ class TripletGraphDataset(Dataset):
         query_index = self.query_indices[local_index]
         rng = random.Random(self.seed + self.epoch * 100_003 + query_index)
         positive_index = rng.choice(self.positives[query_index])
+        blocked = self.positives[query_index]
+        if self.ignored is not None:
+            blocked = set(blocked) | set(self.ignored.get(query_index, ()))
         negatives = [
             item
             for item in self.hard_negatives.get(query_index, ())
-            if item not in self.positives[query_index]
+            if item not in blocked
         ]
         if not negatives:
             negatives = [
                 index
                 for index in range(len(self.database_paths))
-                if index not in self.positives[query_index]
+                if index not in blocked
             ]
             rng.shuffle(negatives)
         if len(negatives) < self.negatives_per_query:
@@ -380,6 +394,35 @@ def negative_exclusions(
     queries = {int(k): (float(v[0]), float(v[1])) for k, v in query_positions.items() if int(k) in wanted}
     database = {int(k): (float(v[0]), float(v[1])) for k, v in database_positions.items()}
     return build_radius_positives(queries, database, float(radius))
+
+
+def training_positives(
+    split: Mapping[str, Any], query_indices: Sequence[int], radius: float
+) -> dict[int, list[int]]:
+    """Ground-truth positives close enough to be trained as positives.
+
+    NetVLAD trains on positives within 10 metres and negatives beyond 25, and
+    leaves the frames in between out of training. Evaluation keeps the whole
+    ground truth; only the positives a triplet may draw from shrink. A query
+    with no ground-truth positive this close takes no part in training.
+    """
+
+    query_positions = split.get("query_positions")
+    database_positions = split.get("database_positions")
+    if not query_positions or not database_positions:
+        raise ValueError(
+            "training.positive_max_distance_m needs metric positions in the prepared "
+            "split; run prepare again with this configuration"
+        )
+    from tgseqloc.data.robotcar import build_radius_positives
+
+    wanted = {int(index) for index in query_indices}
+    queries = {int(k): (float(v[0]), float(v[1])) for k, v in query_positions.items() if int(k) in wanted}
+    database = {int(k): (float(v[0]), float(v[1])) for k, v in database_positions.items()}
+    ground_truth = {int(k): {int(x) for x in v} for k, v in split.get("positives", {}).items()}
+    near = build_radius_positives(queries, database, float(radius))
+    kept = {q: sorted(set(v) & ground_truth.get(q, set())) for q, v in near.items()}
+    return {q: v for q, v in kept.items() if v}
 
 
 def text_center_from_graphs(graphs, text_emb_dim: int) -> torch.Tensor:
@@ -975,16 +1018,24 @@ class Trainer:
         negatives_per_query = int(
             self._training_value("negatives_per_query", 2)
         )
+        positive_radius = float(self._training_value("positive_max_distance_m", 0.0) or 0.0)
+        train_positives, ignored = self.positives, None
+        if positive_radius > 0:
+            train_positives = training_positives(
+                self.split, self.train_query_indices, positive_radius
+            )
+            ignored = self.positives
         dataset = TripletGraphDataset(
             self.database_paths,
             self.query_paths,
             self.train_query_indices,
-            self.positives,
+            train_positives,
             negatives_per_query,
             self.normalizer,
             self.text_emb_dim,
             seed,
             self.edge_attr_dim,
+            **({"ignored": ignored} if ignored is not None else {}),
         )
         if not dataset:
             raise ValueError("no train query has both positives and negative candidates")
