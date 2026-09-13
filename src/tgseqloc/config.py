@@ -195,6 +195,12 @@ class ModelConfig:
     heads: int = 4
     use_text_nodes: bool = True
     use_edge_geometry: bool = True
+    # How recognized text enters the graph. "node" wires a text node to its
+    # object; "additive" sums the text into that object's feature instead, so a
+    # frame without text is encoded exactly as without the text layer.
+    text_fusion: str = "node"
+    # Chance, during training only, of leaving out each text term (additive form).
+    text_dropout: float = 0.0
 
 
 @dataclass(slots=True)
@@ -395,6 +401,10 @@ class AppConfig:
             raise ConfigError("preprocess.text_min_length must be non-negative")
         if self.dataset.split_folds_path and self.dataset.split_fold < 0:
             raise ConfigError("dataset.split_fold must be set with dataset.split_folds_path")
+        if self.model.text_fusion not in ("node", "additive"):
+            raise ConfigError("model.text_fusion must be 'node' or 'additive'")
+        if not 0.0 <= self.model.text_dropout < 1.0:
+            raise ConfigError("model.text_dropout must be in [0, 1)")
         if not 0.0 <= self.preprocess.ocr_confidence_threshold <= 1.0:
             raise ConfigError(
                 "preprocess.ocr_confidence_threshold must be in [0, 1]"

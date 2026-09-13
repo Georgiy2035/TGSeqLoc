@@ -6,6 +6,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, global_max_pool, global_mean_pool
+from torch_geometric.utils import scatter
 
 
 class GATGraphEncoder(nn.Module):
@@ -27,18 +28,26 @@ class GATGraphEncoder(nn.Module):
         use_text_nodes: bool = False,
         text_emb_dim: int = 384,
         use_edge_geometry: bool = False,
+        text_fusion: str = "node",
+        text_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if n_layers < 1:
             raise ValueError("n_layers must be at least one")
         if use_text_nodes and num_node_classes is None:
             raise ValueError("text nodes require num_node_classes")
+        if text_fusion not in ("node", "additive"):
+            raise ValueError(f"text_fusion must be 'node' or 'additive', got {text_fusion!r}")
+        if not 0.0 <= float(text_dropout) < 1.0:
+            raise ValueError("text_dropout must be in [0, 1)")
         self.use_node_class = num_node_classes is not None
         self.use_edge_label = num_edge_classes is not None
         self.use_text_nodes = bool(use_text_nodes)
         self.text_emb_dim = int(text_emb_dim)
         self.use_edge_geometry = bool(use_edge_geometry)
         self.edge_cont_dim = int(edge_cont_dim)
+        self.text_fusion = str(text_fusion)
+        self.text_dropout = float(text_dropout)
         self.init_args = {
             "in_dim": int(in_dim),
             "hidden_dim": int(hidden_dim),
@@ -55,6 +64,11 @@ class GATGraphEncoder(nn.Module):
             "text_emb_dim": int(text_emb_dim),
             "use_edge_geometry": bool(use_edge_geometry),
         }
+        if self.text_fusion != "node" or self.text_dropout:
+            # Recorded only when set, so a checkpoint of the node form keeps the
+            # arguments it was saved with and still loads.
+            self.init_args["text_fusion"] = self.text_fusion
+            self.init_args["text_dropout"] = self.text_dropout
 
         self.node_emb = (
             nn.Embedding(num_node_classes, node_emb_dim)
@@ -62,9 +76,15 @@ class GATGraphEncoder(nn.Module):
             else None
         )
         self.text_proj = (
-            nn.Linear(text_emb_dim, node_emb_dim) if self.use_text_nodes else None
+            nn.Linear(text_emb_dim, node_emb_dim)
+            if self.use_text_nodes and self.text_fusion == "node"
+            else None
         )
-        self.text_ln = nn.LayerNorm(node_emb_dim) if self.use_text_nodes else None
+        self.text_ln = (
+            nn.LayerNorm(node_emb_dim)
+            if self.use_text_nodes and self.text_fusion == "node"
+            else None
+        )
         self.edge_emb = (
             nn.Embedding(num_edge_classes, edge_emb_dim)
             if self.use_edge_label
@@ -125,6 +145,13 @@ class GATGraphEncoder(nn.Module):
             nn.Linear(hidden_dim, proj_dim),
         )
         self._out_dim = int(proj_dim)
+        # Created last and without a bias: every other weight is drawn exactly
+        # as in a model without text, and a zero text vector adds nothing.
+        self.text_add = (
+            nn.Linear(text_emb_dim, node_emb_dim, bias=False)
+            if self.use_text_nodes and self.text_fusion == "additive"
+            else None
+        )
 
     @staticmethod
     def _indices(values: Tensor, size: int, name: str, device: torch.device) -> Tensor:
@@ -144,7 +171,7 @@ class GATGraphEncoder(nn.Module):
             node_class, self.node_emb.num_embeddings, "node_class", x.device
         )
         node_features = self.node_emb(node_class)
-        if self.use_text_nodes:
+        if self.use_text_nodes and self.text_fusion == "node":
             is_text = getattr(batch, "is_text", None)
             text_emb = getattr(batch, "text_emb", None)
             if is_text is None or text_emb is None:
@@ -211,6 +238,8 @@ class GATGraphEncoder(nn.Module):
         edge_index = batch.edge_index.to(device=x.device, dtype=torch.long)
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
             raise ValueError("edge_index must have shape [2, edges]")
+        if self.text_add is not None:
+            return self._forward_additive(batch, x, edge_index, return_attn)
         h = self.input_mlp(self._node_features(batch, x))
         edge_attr = self._edge_features(batch, x, edge_index.shape[1])
         attention = None
@@ -230,6 +259,99 @@ class GATGraphEncoder(nn.Module):
             graph_index = graph_index.to(x.device)
         pooled = torch.cat(
             (global_mean_pool(h, graph_index), global_max_pool(h, graph_index)), dim=1
+        )
+        descriptor = F.normalize(self.proj(pooled), p=2, dim=1)
+        return (descriptor, attention) if return_attn else descriptor
+
+    def _forward_additive(self, batch, x: Tensor, edge_index: Tensor, return_attn: bool):
+        """Text as a term added to the object it is written on.
+
+        A text node adds nothing to the graph that is encoded: its projected
+        embedding is summed into the feature of the object it is attached to,
+        and then the text nodes and their edges are dropped before message
+        passing and pooling. For a frame without text the sum is empty, so the
+        frame is encoded by exactly the computation of a model without the text
+        layer -- the same nodes, the same edges, the same attention
+        normalization, the same pooling set.
+
+        This is what the node form cannot give. There an extra node shifts the
+        mean over nodes, can only raise the maximum, takes a share of its
+        object's attention and alters the mean edge attribute that fills that
+        object's self-loop, so that whether a frame carries text changes its
+        descriptor regardless of what the text says. On Oxford RobotCar that
+        pulled queries with text towards any frame with text.
+        """
+
+        is_text = getattr(batch, "is_text", None)
+        text_emb = getattr(batch, "text_emb", None)
+        if is_text is None or text_emb is None:
+            raise ValueError("text_fusion='additive' requires is_text and text_emb")
+        is_text = is_text.to(device=x.device, dtype=torch.bool).reshape(-1)
+        text_emb = text_emb.to(device=x.device, dtype=x.dtype)
+        if is_text.numel() != x.shape[0]:
+            raise ValueError("is_text must contain one value per node")
+        if tuple(text_emb.shape) != (x.shape[0], self.text_emb_dim):
+            raise ValueError(
+                f"text_emb must have shape ({x.shape[0]}, {self.text_emb_dim})"
+            )
+        edge_count = edge_index.shape[1]
+        text_edge = getattr(batch, "is_text_edge", None)
+        if text_edge is None:
+            text_edge = is_text[edge_index[0]] | is_text[edge_index[1]]
+        else:
+            text_edge = text_edge.to(device=x.device, dtype=torch.bool).reshape(-1)
+            if text_edge.numel() != edge_count:
+                raise ValueError("is_text_edge must contain one value per edge")
+
+        features = self._node_features(batch, x)
+        in_dim = x.shape[1]
+        link = text_edge & is_text[edge_index[0]] & ~is_text[edge_index[1]]
+        if bool(link.any()):
+            assert self.text_add is not None
+            term = self.text_add(text_emb[edge_index[0, link]])
+            if self.training and self.text_dropout > 0:
+                keep = torch.rand(term.shape[0], 1, device=x.device) >= self.text_dropout
+                term = term * keep.to(term.dtype)
+            added = scatter(
+                term, edge_index[1, link], dim=0, dim_size=x.shape[0], reduce="sum"
+            )
+            features = torch.cat(
+                (features[:, :in_dim], features[:, in_dim:] + added), dim=1
+            )
+
+        scene = ~is_text
+        edge_attr = self._edge_features(batch, x, edge_count)
+        scene_edge = scene[edge_index[0]] & scene[edge_index[1]] & ~text_edge
+        remap = torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
+        remap[scene] = torch.arange(int(scene.sum()), device=x.device)
+        scene_index = remap[edge_index[:, scene_edge]]
+        scene_attr = edge_attr[scene_edge]
+
+        h = self.input_mlp(features[scene])
+        attention = None
+        for index, conv in enumerate(self.convs):
+            if return_attn and index == len(self.convs) - 1:
+                h, attention = conv(
+                    h, scene_index, scene_attr, return_attention_weights=True
+                )
+            else:
+                h = conv(h, scene_index, scene_attr)
+            h = self.dropout(self.activation(h))
+
+        graph_index = getattr(batch, "batch", None)
+        if graph_index is None:
+            graph_index = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+            graphs = 1
+        else:
+            graph_index = graph_index.to(x.device)
+            graphs = int(getattr(batch, "num_graphs", int(graph_index.max()) + 1))
+        graph_index = graph_index[scene]
+        pooled = torch.cat(
+            (
+                global_mean_pool(h, graph_index, size=graphs),
+                global_max_pool(h, graph_index, size=graphs),
+            ),
+            dim=1,
         )
         descriptor = F.normalize(self.proj(pooled), p=2, dim=1)
         return (descriptor, attention) if return_attn else descriptor

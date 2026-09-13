@@ -116,7 +116,12 @@ def write_robotcar_split(
     split["queries_without_positives"] = sum(
         1 for index in positions[query] if not positives.get(index)
     )
-    save_json(split, mappings_root / "temporal_split.json")
+    split_name = (
+        f"split_fold{int(_get(settings, 'split_fold', -1))}.json"
+        if folds_path
+        else "temporal_split.json"
+    )
+    save_json(split, mappings_root / split_name)
 
     digest = hashlib.sha256(
         json.dumps(

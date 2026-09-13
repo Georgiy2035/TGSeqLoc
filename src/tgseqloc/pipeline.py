@@ -57,7 +57,12 @@ class PipelineRunner:
 
     @property
     def split_path(self) -> Path:
-        return self.prepared_data_root / "mappings" / "temporal_split.json"
+        # Each fold of a block cross validation has a file of its own, so that
+        # preparing one fold never overwrites the split another protocol reads.
+        mappings = self.prepared_data_root / "mappings"
+        if self.config.dataset.split_folds_path:
+            return mappings / f"split_fold{int(self.config.dataset.split_fold)}.json"
+        return mappings / "temporal_split.json"
 
     def validate(self, *, check_inputs: bool = True) -> dict[str, Any]:
         """Validate configuration, registered names, and precomputed inputs."""

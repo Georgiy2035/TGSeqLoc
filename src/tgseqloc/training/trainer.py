@@ -335,11 +335,25 @@ def fit_edge_normalizer(
     paths: Sequence[str | Path],
     edge_attr_dim: int,
     log_indices: Sequence[int] | None = None,
+    *,
+    exclude_text_edges: bool = False,
 ) -> EdgeAttrNormalizer:
+    """Standardization statistics for edge attributes.
+
+    ``exclude_text_edges`` fits them on scene relations alone. The additive text
+    form never passes text edges to the encoder, and if their geometry still
+    entered these statistics a frame without text would be normalized
+    differently from the text-free pipeline.
+    """
+
     normalizer = EdgeAttrNormalizer(log_indices, feature_dim=edge_attr_dim)
     for path in paths:
         graph = load_graph(path, edge_attr_dim=edge_attr_dim)
-        normalizer.update(graph.edge_attr)
+        attributes = graph.edge_attr
+        text_edge = getattr(graph, "is_text_edge", None)
+        if exclude_text_edges and attributes is not None and text_edge is not None:
+            attributes = attributes[~text_edge.bool().reshape(-1)]
+        normalizer.update(attributes)
     return normalizer.finalize()
 
 
@@ -381,6 +395,7 @@ class Trainer:
         if split_value is None:
             raise ValueError("a prepared split mapping or split JSON path is required")
         self.split = _load_json(split_value, self.data_root)
+        self._check_split_matches_config()
         self._prepare_split()
         self._validate_manifest_graph_records()
         requested_device = device or _get(
@@ -401,6 +416,30 @@ class Trainer:
         self.start_epoch = 1
         self.best_metric = float("-inf")
         self.run_dir = self._resolve_run_dir()
+
+    def _check_split_matches_config(self) -> None:
+        """Refuse a split written for another protocol.
+
+        Preparation writes the split into the prepared root, and one root serves
+        several protocols -- a single time cut and every fold of the block cross
+        validation. Training that silently read a split left there by another
+        protocol would report numbers for a test set nobody asked for.
+        """
+
+        folds_path = _get(self.config, "dataset.split_folds_path", default="")
+        recorded = self.split.get("split_fold")
+        if folds_path:
+            expected = int(_get(self.config, "dataset.split_fold", default=-1))
+            if recorded is None or int(recorded) != expected:
+                raise ValueError(
+                    f"the prepared split is for fold {recorded}, the configuration "
+                    f"asks for fold {expected}; run prepare with this configuration"
+                )
+        elif recorded is not None:
+            raise ValueError(
+                f"the prepared split is fold {recorded} of a cross validation, the "
+                "configuration asks for a single split; run prepare with this configuration"
+            )
 
     def _paths(self, key: str, fallback_dir: str) -> list[Path]:
         values = self.split.get(key)
@@ -876,6 +915,7 @@ class Trainer:
                 self._normalizer_paths(),
                 self.edge_attr_dim,
                 _get(self.config, "normalization.log_indices", default=None),
+                exclude_text_edges=getattr(self.model, "text_add", None) is not None,
             )
 
         negatives_per_query = int(
