@@ -92,3 +92,39 @@ def mine_hard_negatives(
             )
         mined[query_index] = selected
     return mined
+
+
+def random_negatives(
+    database_embeddings,
+    query_embeddings,
+    query_indices: Sequence[int],
+    positives: Mapping[int, Sequence[int]] | Mapping[str, Sequence[int]],
+    negatives_per_query: int,
+    search_depth: int = 256,
+    seed: int = 0,
+    exclusions: Mapping[int, Sequence[int]] | None = None,
+) -> dict[int, list[int]]:
+    """Uniformly random non-positive database items, ignoring the descriptors.
+
+    Same signature as :func:`mine_hard_negatives`, so it is a drop-in
+    ``training.miner``. It exists to tell whether mining itself stalls training:
+    when all descriptors start nearly equal, the "hardest" negatives are an
+    arbitrary choice that changes every epoch.
+    """
+
+    del query_embeddings, search_depth
+    size = len(database_embeddings)
+    rng = np.random.default_rng(seed)
+    result: dict[int, list[int]] = {}
+    for query_index in (int(value) for value in query_indices):
+        blocked = {int(v) for v in positives.get(query_index, positives.get(str(query_index), ()))}  # type: ignore[arg-type]
+        if exclusions is not None:
+            blocked |= {int(v) for v in exclusions.get(query_index, ())}
+        chosen: list[int] = []
+        if size > len(blocked):
+            while len(chosen) < negatives_per_query:
+                candidate = int(rng.integers(size))
+                if candidate not in blocked:
+                    chosen.append(candidate)
+        result[query_index] = chosen
+    return result

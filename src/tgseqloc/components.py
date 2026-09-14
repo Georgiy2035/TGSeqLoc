@@ -60,6 +60,7 @@ def _graph_entries() -> tuple[Entry, ...]:
         build_multilingual_e5,
     )
     from tgseqloc.training import mine_hard_negatives
+    from tgseqloc.training.mining import random_negatives
 
     return (
         ("source", "precomputed_paddleocr", parse_paddleocr),
@@ -74,6 +75,7 @@ def _graph_entries() -> tuple[Entry, ...]:
         ("dataset", "v4rl", process_v4rl),
         ("dataset", "robotcar", process_robotcar),
         ("miner", "hard_negative", mine_hard_negatives),
+        ("miner", "random", random_negatives),
         ("retriever", "faiss_cosine", Retriever),
         ("metric", "recall_at_k", RecallAtK),
     )
