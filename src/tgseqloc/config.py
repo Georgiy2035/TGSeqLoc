@@ -204,6 +204,9 @@ class ModelConfig:
     # "set" form only: centre string embeddings on the mean string of the
     # training graphs before encoding them.
     text_centering: bool = False
+    # Additive and set forms: start the last text layer at zero, so training
+    # begins from the text-free model.
+    text_zero_init: bool = False
 
 
 @dataclass(slots=True)
@@ -415,6 +418,8 @@ class AppConfig:
             raise ConfigError("model.text_fusion must be 'node', 'additive' or 'set'")
         if not 0.0 <= self.model.text_dropout < 1.0:
             raise ConfigError("model.text_dropout must be in [0, 1)")
+        if self.model.text_zero_init and self.model.text_fusion == "node":
+            raise ConfigError("model.text_zero_init requires text_fusion additive or set")
         if not 0.0 <= self.training.negative_min_distance_m < float("inf"):
             raise ConfigError("training.negative_min_distance_m must be a non-negative number")
         if self.training.positive_max_distance_m < 0:

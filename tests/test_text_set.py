@@ -90,3 +90,33 @@ class SetTextTests(unittest.TestCase):
         center = text_center_from_graphs([graph([torch.ones(TEXT_DIM)]), graph([torch.full((TEXT_DIM,), 3.0)]), graph()], TEXT_DIM)
         self.assertTrue(torch.allclose(center, torch.full((TEXT_DIM,), 2.0)))
         self.assertTrue(torch.equal(text_center_from_graphs([graph()], TEXT_DIM), torch.zeros(TEXT_DIM)))
+
+    def test_zero_init_starts_from_the_text_free_descriptor(self) -> None:
+        """С нулевым выходом текстовой ветки необученная модель в точности равна модели без текста."""
+
+        strings = [torch.ones(TEXT_DIM), torch.full((TEXT_DIM,), 2.0)]
+        text_free = encode(model(use_text_nodes=False), graph())
+        for fusion in ("set", "additive"):
+            m = model(fusion, text_zero_init=True)
+            self.assertTrue(torch.allclose(encode(m, graph(strings)), text_free, atol=1e-6), fusion)
+            self.assertTrue(m.init_args["text_zero_init"])
+
+    def test_zero_init_leaves_every_other_weight_as_it_was(self) -> None:
+        plain, zero = model().state_dict(), model(text_zero_init=True).state_dict()
+        for key, value in plain.items():
+            if key != "text_out.weight":
+                self.assertTrue(torch.equal(value, zero[key]), key)
+        self.assertEqual(int(zero["text_out.weight"].abs().sum()), 0)
+        self.assertNotIn("text_zero_init", model().init_args)
+
+    def test_zero_init_still_lets_text_in(self) -> None:
+        """Градиент доходит до нулевого слоя, иначе текст никогда бы не включился."""
+
+        m = model(text_zero_init=True).train()
+        out = m(Batch.from_data_list([graph([torch.ones(TEXT_DIM)])]))
+        out.sum().backward()
+        self.assertGreater(float(m.text_out.weight.grad.abs().sum()), 0.0)
+
+    def test_zero_init_is_refused_for_the_node_form(self) -> None:
+        with self.assertRaises(ValueError):
+            model("node", text_zero_init=True)

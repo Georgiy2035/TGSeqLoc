@@ -31,12 +31,15 @@ class GATGraphEncoder(nn.Module):
         text_fusion: str = "node",
         text_dropout: float = 0.0,
         text_centering: bool = False,
+        text_zero_init: bool = False,
     ) -> None:
         super().__init__()
         if n_layers < 1:
             raise ValueError("n_layers must be at least one")
         if use_text_nodes and num_node_classes is None:
             raise ValueError("text nodes require num_node_classes")
+        if text_zero_init and text_fusion == "node":
+            raise ValueError("text_zero_init applies to the additive and set forms only")
         if text_fusion not in ("node", "additive", "set"):
             raise ValueError(
                 f"text_fusion must be 'node', 'additive' or 'set', got {text_fusion!r}"
@@ -52,6 +55,7 @@ class GATGraphEncoder(nn.Module):
         self.text_fusion = str(text_fusion)
         self.text_dropout = float(text_dropout)
         self.text_centering = bool(text_centering)
+        self.text_zero_init = bool(text_zero_init)
         self.init_args = {
             "in_dim": int(in_dim),
             "hidden_dim": int(hidden_dim),
@@ -75,6 +79,8 @@ class GATGraphEncoder(nn.Module):
             self.init_args["text_dropout"] = self.text_dropout
         if self.text_centering:
             self.init_args["text_centering"] = True
+        if self.text_zero_init:
+            self.init_args["text_zero_init"] = True
 
         self.node_emb = (
             nn.Embedding(num_node_classes, node_emb_dim)
@@ -176,6 +182,14 @@ class GATGraphEncoder(nn.Module):
             self.register_buffer("text_center", torch.zeros(text_emb_dim))
         else:
             self.text_center = None
+        # The last text layer starts at zero, so the untrained model is exactly
+        # the text-free one and text enters only as far as training pulls it in.
+        # The layer is still drawn first: the random stream, and with it every
+        # other weight, stays as without this option.
+        if self.text_zero_init:
+            last = self.text_add if self.text_add is not None else self.text_out
+            if last is not None:
+                nn.init.zeros_(last.weight)
 
     @staticmethod
     def _indices(values: Tensor, size: int, name: str, device: torch.device) -> Tensor:
