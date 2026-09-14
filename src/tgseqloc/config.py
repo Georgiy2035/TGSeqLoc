@@ -243,6 +243,8 @@ class TrainingConfig:
     positive_max_distance_m: float = 0.0
     max_grad_norm: float = 5.0
     miner: str = "hard_negative"
+    # Epochs at the start that use random negatives instead of ``miner``.
+    miner_warmup_epochs: int = 0
     recall_values: list[int] = field(default_factory=lambda: [1, 5, 10])
     early_stopping_metric: str = "R@5"
     resume_from: Path | None = None
@@ -453,6 +455,8 @@ class AppConfig:
         if self.training.weight_decay < 0:
             raise ConfigError("training.weight_decay must be non-negative")
         _choice("training.loss", self.training.loss, ("triplet", "infonce"))
+        if self.training.miner_warmup_epochs < 0:
+            raise ConfigError("training.miner_warmup_epochs must be non-negative")
         if not self.training.temperature > 0:
             raise ConfigError("training.temperature must be greater than zero")
 

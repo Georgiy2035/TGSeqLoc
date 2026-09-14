@@ -20,7 +20,7 @@ from torch_geometric.data import Batch, Data
 from tgseqloc.evaluation import evaluate_retrieval
 from tgseqloc.models import EdgeAttrNormalizer, GATGraphEncoder
 
-from .mining import mine_hard_negatives
+from .mining import mine_hard_negatives, random_negatives
 
 
 def _plain(value: Any) -> Any:
@@ -1072,6 +1072,7 @@ class Trainer:
         loss_name = str(self._training_value("loss", "triplet"))
         temperature = float(self._training_value("temperature", 0.07))
         epochs = int(self._training_value("epochs", 30))
+        warmup = int(self._training_value("miner_warmup_epochs", 0) or 0)
         patience = int(self._training_value("patience", 7))
         no_improvement = 0
         history = []
@@ -1084,7 +1085,11 @@ class Trainer:
             query_embeddings = self._encode(
                 [self.query_paths[index] for index in dataset.query_indices]
             )
-            hard = self.miner(
+            # Warm-up on random negatives: while descriptors are still nearly
+            # equal, the "hardest" negatives are indistinguishable from the query
+            # and the triplet loss stays at its margin.
+            miner = random_negatives if epoch <= warmup else self.miner
+            hard = miner(
                 database_embeddings,
                 query_embeddings,
                 dataset.query_indices,
