@@ -32,12 +32,18 @@ class GATGraphEncoder(nn.Module):
         text_dropout: float = 0.0,
         text_centering: bool = False,
         text_zero_init: bool = False,
+        descriptor_norm: str = "none",
+        proj_bias: bool = True,
     ) -> None:
         super().__init__()
         if n_layers < 1:
             raise ValueError("n_layers must be at least one")
         if use_text_nodes and num_node_classes is None:
             raise ValueError("text nodes require num_node_classes")
+        if descriptor_norm not in ("none", "pooled", "output"):
+            raise ValueError(
+                f"descriptor_norm must be 'none', 'pooled' or 'output', got {descriptor_norm!r}"
+            )
         if text_zero_init and text_fusion == "node":
             raise ValueError("text_zero_init applies to the additive and set forms only")
         if text_fusion not in ("node", "additive", "set"):
@@ -56,6 +62,8 @@ class GATGraphEncoder(nn.Module):
         self.text_dropout = float(text_dropout)
         self.text_centering = bool(text_centering)
         self.text_zero_init = bool(text_zero_init)
+        self.descriptor_norm = str(descriptor_norm)
+        self.proj_bias = bool(proj_bias)
         self.init_args = {
             "in_dim": int(in_dim),
             "hidden_dim": int(hidden_dim),
@@ -81,6 +89,10 @@ class GATGraphEncoder(nn.Module):
             self.init_args["text_centering"] = True
         if self.text_zero_init:
             self.init_args["text_zero_init"] = True
+        if self.descriptor_norm != "none":
+            self.init_args["descriptor_norm"] = self.descriptor_norm
+        if not self.proj_bias:
+            self.init_args["proj_bias"] = False
 
         self.node_emb = (
             nn.Embedding(num_node_classes, node_emb_dim)
@@ -154,7 +166,21 @@ class GATGraphEncoder(nn.Module):
         self.proj = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, proj_dim),
+            nn.Linear(hidden_dim, proj_dim, bias=self.proj_bias),
+        )
+        # Batch normalization against the collapse at initialization: pooled
+        # ReLU features are all non-negative and the projection adds a shared
+        # bias, so every frame starts at nearly the same descriptor (pairwise
+        # cosine ~0.999) and the triplet loss sits at its margin. Normalizing
+        # per dimension over the batch removes that shared component. Neither
+        # layer draws random numbers, so every other weight stays as without.
+        self.pooled_norm = (
+            nn.BatchNorm1d(hidden_dim * 2) if self.descriptor_norm == "pooled" else None
+        )
+        self.output_norm = (
+            nn.BatchNorm1d(proj_dim, affine=False)
+            if self.descriptor_norm == "output"
+            else None
         )
         self._out_dim = int(proj_dim)
         # Created last and without a bias: every other weight is drawn exactly
@@ -190,6 +216,14 @@ class GATGraphEncoder(nn.Module):
             last = self.text_add if self.text_add is not None else self.text_out
             if last is not None:
                 nn.init.zeros_(last.weight)
+
+    def _project(self, pooled: Tensor) -> Tensor:
+        if self.pooled_norm is not None:
+            pooled = self.pooled_norm(pooled)
+        out = self.proj(pooled)
+        if self.output_norm is not None:
+            out = self.output_norm(out)
+        return out
 
     @staticmethod
     def _indices(values: Tensor, size: int, name: str, device: torch.device) -> Tensor:
@@ -300,7 +334,7 @@ class GATGraphEncoder(nn.Module):
         pooled = torch.cat(
             (global_mean_pool(h, graph_index), global_max_pool(h, graph_index)), dim=1
         )
-        descriptor = F.normalize(self.proj(pooled), p=2, dim=1)
+        descriptor = F.normalize(self._project(pooled), p=2, dim=1)
         return (descriptor, attention) if return_attn else descriptor
 
     def _forward_additive(self, batch, x: Tensor, edge_index: Tensor, return_attn: bool):
@@ -393,7 +427,7 @@ class GATGraphEncoder(nn.Module):
             ),
             dim=1,
         )
-        descriptor = F.normalize(self.proj(pooled), p=2, dim=1)
+        descriptor = F.normalize(self._project(pooled), p=2, dim=1)
         return (descriptor, attention) if return_attn else descriptor
 
     def _forward_set(self, batch, x: Tensor, edge_index: Tensor, return_attn: bool):
@@ -471,7 +505,7 @@ class GATGraphEncoder(nn.Module):
             ),
             dim=1,
         )
-        descriptor = self.proj(pooled)
+        descriptor = self._project(pooled)
 
         link = text_edge & is_text[edge_index[0]] & ~is_text[edge_index[1]]
         if bool(link.any()):

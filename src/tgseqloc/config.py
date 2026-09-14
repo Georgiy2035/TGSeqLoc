@@ -207,6 +207,11 @@ class ModelConfig:
     # Additive and set forms: start the last text layer at zero, so training
     # begins from the text-free model.
     text_zero_init: bool = False
+    # Batch normalization against descriptor collapse: "pooled" before the
+    # projection, "output" on the descriptor before L2 normalization.
+    descriptor_norm: str = "none"
+    # Bias of the last projection layer.
+    proj_bias: bool = True
 
 
 @dataclass(slots=True)
@@ -419,7 +424,9 @@ class AppConfig:
         if not 0.0 <= self.model.text_dropout < 1.0:
             raise ConfigError("model.text_dropout must be in [0, 1)")
         if self.model.text_zero_init and self.model.text_fusion == "node":
-            raise ConfigError("model.text_zero_init requires text_fusion additive or set")
+            raise ConfigError("model.text_zero_init requires text_fusion 'additive' or 'set'")
+        if self.model.descriptor_norm not in ("none", "pooled", "output"):
+            raise ConfigError("model.descriptor_norm must be 'none', 'pooled' or 'output'")
         if not 0.0 <= self.training.negative_min_distance_m < float("inf"):
             raise ConfigError("training.negative_min_distance_m must be a non-negative number")
         if self.training.positive_max_distance_m < 0:
