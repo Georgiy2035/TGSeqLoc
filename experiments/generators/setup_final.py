@@ -40,9 +40,11 @@ for arm in ("add", "notext"):
                         out += [f"    {cam}:",
                                 f"      ocr_root_template: {MONO_OCR}",
                                 f"      frame_list_path: {DATA}/robotcar_frames_{cam}.txt"]
+            # 100 ближайших кадров в test_retrievals.json, чтобы R@25 и R@100 считались без перепрогона.
+            out += ["retrieval:", "  top_k: 100"]
             body = "\n".join(out) + "\n"
             for need in ("paddleocr_v5.json", "scene_graphs_robotcar_m2f", "n_layers: 1", "positive_max_distance_m: 10.0",
-                         "miner_warmup_epochs: 10", "epochs: 30", "patience: 5", "cameras:", str(ROOTS[arm])):
+                         "miner_warmup_epochs: 10", "top_k: 100", "epochs: 30", "patience: 5", "cameras:", str(ROOTS[arm])):
                 assert need in body, (arm, f, s, need)
             assert ("text_fusion: additive" in body) == (arm == "add")
             (C / f"final4_{arm}_f{f}_s{s}.yaml").write_text(body)
