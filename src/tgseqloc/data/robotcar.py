@@ -12,7 +12,9 @@ separate places, and the split has to check distance explicitly.
 from __future__ import annotations
 
 import bisect
+import copy
 import csv
+import dataclasses
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,6 +159,113 @@ def discover_robotcar_records(
                 )
             )
     return records
+
+
+def camera_frame_stem(camera: str, timestamp: str | int, primary: str) -> str:
+    """Name of a frame of ``camera``.
+
+    The primary camera keeps the bare timestamp, so a single-camera run and
+    every split written for it keep their frame names. Other cameras are
+    prefixed: the side and rear cameras of RobotCar fire at the same instant,
+    and bare timestamps would collide.
+    """
+
+    return str(timestamp) if camera == primary else f"{camera}-{timestamp}"
+
+
+def frame_camera(stem: str, primary: str) -> str:
+    """Camera of a frame named by :func:`camera_frame_stem`."""
+
+    return stem.split("-", 1)[0] if "-" in stem else primary
+
+
+def discover_camera_records(
+    cameras: Mapping[str, Mapping[str, Any]],
+    traversals: Mapping[str, str],
+    *,
+    primary: str,
+    ocr_file_name: str = "paddleocr_v5.json",
+    require_inputs: bool = True,
+) -> list[FrameRecord]:
+    """Frames of several cameras as frames of the same traversals.
+
+    Each camera is discovered on its own, from its own recognizer output,
+    scene graphs and frame list; its frames then join the traversal as
+    ordinary frames. Nothing is merged across cameras: a side frame is a
+    database or query frame like any front frame, and its ground truth comes
+    from where the vehicle was when it fired. Indices run contiguously per
+    traversal with the primary camera first, so the primary frames keep the
+    indices a single-camera run gives them.
+    """
+
+    if primary not in cameras:
+        raise ValueError(f"primary camera {primary!r} is not among the cameras {sorted(cameras)}")
+    found: dict[str, list[FrameRecord]] = {}
+    for camera, source in cameras.items():
+        def fill(key: str) -> str:
+            return str(source.get(key, "") or "").replace("{camera}", camera)
+
+        frame_list_path = fill("frame_list_path")
+        found[camera] = discover_robotcar_records(
+            fill("ocr_root_template"),
+            fill("scene_graph_root_template"),
+            traversals,
+            image_path_template=fill("image_path_template"),
+            ocr_file_name=str(source.get("ocr_file_name") or ocr_file_name),
+            require_inputs=require_inputs,
+            frame_list=load_frame_list(frame_list_path) if frame_list_path else None,
+        )
+    order = [primary] + [camera for camera in cameras if camera != primary]
+    records: list[FrameRecord] = []
+    for sequence in traversals:
+        index = 0
+        for camera in order:
+            for record in found[camera]:
+                if record.sequence != sequence:
+                    continue
+                records.append(dataclasses.replace(
+                    record, stem=camera_frame_stem(camera, record.stem, primary), index=index,
+                ))
+                index += 1
+    return records
+
+
+def extend_fold_assignment(
+    assignment: Mapping[str, Any],
+    frames: Sequence[tuple[str, int]],
+    max_gap: int,
+) -> dict[str, Any]:
+    """Put frames of other cameras into the part of the primary frame nearest in time.
+
+    The fold file names primary frames only. A frame of another camera taken
+    within ``max_gap`` (in timestamp units) of a primary frame belongs to the
+    same stretch of road and joins that frame's part; one farther from every
+    primary frame -- in a guard band, or where the primary camera has no
+    frame -- joins no part, exactly as the guard band's primary frames do not.
+    The input is left untouched.
+    """
+
+    result = copy.deepcopy(dict(assignment))
+    for parts in (result.get("assignment") or {}).values():
+        timeline = sorted(
+            (int(stem), part)
+            for part, stems in parts.items()
+            for stem in stems
+            if str(stem).isdigit()
+        )
+        times = [time for time, _ in timeline]
+        additions: dict[str, list[str]] = {part: [] for part in parts}
+        for stem, timestamp in frames:
+            position = bisect.bisect_left(times, int(timestamp))
+            nearest = [i for i in (position - 1, position) if 0 <= i < len(times)]
+            if not nearest:
+                continue
+            best = min(nearest, key=lambda i: abs(times[i] - int(timestamp)))
+            if abs(times[best] - int(timestamp)) <= max_gap:
+                additions[timeline[best][1]].append(str(stem))
+        for part, stems in additions.items():
+            parts[part] = list(parts[part]) + stems
+    return result
 
 
 def positions_for(records: Sequence[FrameRecord], track: Track) -> dict[int, tuple[float, float]]:

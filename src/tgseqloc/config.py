@@ -63,6 +63,14 @@ class DatasetConfig:
     # Which frames the experiment uses, one stem per line. Empty takes every
     # frame that has both recognized text and a scene graph.
     frame_list_path: str = ""
+    # RobotCar: several cameras as extra frames of the same traversals, each
+    # {name: {ocr_root_template, scene_graph_root_template, image_path_template,
+    # frame_list_path}} overriding the top-level values; empty for one camera.
+    cameras: dict[str, dict[str, Any]] = field(default_factory=dict)
+    primary_camera: str = "stereo_centre"
+    # A frame of another camera joins the fold part of the primary frame
+    # nearest in time, if that frame is at most this many seconds away.
+    camera_fold_max_gap_s: float = 0.3
     # Written block cross-validation assignment; empty means a single time cut.
     split_folds_path: str = ""
     split_fold: int = -1

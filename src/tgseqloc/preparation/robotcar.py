@@ -20,7 +20,10 @@ from tgseqloc.data.robotcar import (
     build_geographic_split,
     load_fold_split,
     build_radius_positives,
+    discover_camera_records,
     discover_robotcar_records,
+    extend_fold_assignment,
+    frame_camera,
     load_frame_list,
     load_ins_track,
     positions_for,
@@ -45,10 +48,38 @@ def _frame_list(config: Any) -> frozenset[str] | None:
     return load_frame_list(path) if path else None
 
 
+def _camera_sources(settings: Any) -> dict[str, dict[str, Any]] | None:
+    """Per-camera inputs, or None for the single front camera.
+
+    A camera inherits the top-level templates and frame list and overrides
+    what differs for it; ``{camera}`` in a template is its name.
+    """
+
+    cameras = _get(settings, "cameras")
+    if not cameras:
+        return None
+    defaults = {
+        key: _get(settings, key)
+        for key in ("ocr_root_template", "scene_graph_root_template", "image_path_template", "frame_list_path", "ocr_file_name")
+    }
+    return {
+        str(name): {**defaults, **dict(source or {})}
+        for name, source in dict(cameras).items()
+    }
+
+
 def discover_robotcar_inputs(config: Any) -> list[FrameRecord]:
     """Frames carrying both a scene graph and recognized text."""
 
     settings = _normalize_config(config)
+    sources = _camera_sources(settings)
+    if sources is not None:
+        return discover_camera_records(
+            sources,
+            _traversals(settings),
+            primary=str(_get(settings, "primary_camera", "stereo_centre")),
+            ocr_file_name=str(_get(settings, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
+        )
     return discover_robotcar_records(
         str(_get(settings, "ocr_root_template")),
         str(_get(settings, "scene_graph_root_template")),
@@ -90,8 +121,19 @@ def write_robotcar_split(
     folds_path = str(_get(settings, "split_folds_path", "") or "")
     if folds_path:
         index_by_stem = {record.stem: record.index for record in by_sequence[query]}
+        assignment = json.loads(Path(folds_path).read_text(encoding="utf-8"))
+        if _camera_sources(settings) is not None:
+            primary = str(_get(settings, "primary_camera", "stereo_centre"))
+            others = [
+                (record.stem, record.timestamp)
+                for record in by_sequence[query]
+                if frame_camera(record.stem, primary) != primary
+            ]
+            # RobotCar timestamps are microseconds.
+            gap = int(float(_get(settings, "camera_fold_max_gap_s", 0.3)) * 1_000_000)
+            assignment = extend_fold_assignment(assignment, others, gap)
         split = load_fold_split(
-            json.loads(Path(folds_path).read_text(encoding="utf-8")),
+            assignment,
             int(_get(settings, "split_fold", -1)),
             index_by_stem,
             positives,

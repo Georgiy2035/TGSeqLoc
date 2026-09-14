@@ -69,6 +69,9 @@ def _normalize_config(config: Any) -> Any:
         "ins_path_template": _get(dataset, "ins_path_template"),
         "image_path_template": _get(dataset, "image_path_template"),
         "frame_list_path": _get(dataset, "frame_list_path"),
+        "cameras": _get(dataset, "cameras"),
+        "primary_camera": _get(dataset, "primary_camera", "stereo_centre"),
+        "camera_fold_max_gap_s": _get(dataset, "camera_fold_max_gap_s", 0.3),
         "split_folds_path": _get(dataset, "split_folds_path", ""),
         "split_fold": int(_get(dataset, "split_fold", -1)),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
@@ -184,6 +187,10 @@ def build_preprocess_fingerprint(
         "backend_identities": backend_identities,
         "source_identities": source_identities,
     }
+    if _get(config, "cameras"):
+        # Only when set, so single-camera preparations keep their fingerprint.
+        payload["cameras"] = _get(config, "cameras")
+        payload["primary_camera"] = _get(config, "primary_camera", "stereo_centre")
     min_length = int(_get(config, "text_min_length", 0) or 0)
     drop_numeric = bool(_get(config, "text_drop_numeric", False))
     if min_length > 0 or drop_numeric:
