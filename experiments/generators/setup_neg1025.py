@@ -1,7 +1,7 @@
 """Выбор негативов при позитивах 10/25 на однослойном GAT: RobotCar, фронтальная камера, графы Gemini, текст Qwen.
 
 Фиксировано: GAT 1 слой, 256/256, позитивы для обучения ≤ 10 м (10–25 м не используются), оценка 25 м,
-lr 3e-5, batch 8, dropout 0.1, triplet 0.3, 2 негатива, 30 эпох без ранней остановки (patience 30), эпоха по валидации.
+lr 3e-5, batch 8, dropout 0.1, triplet 0.3, 2 негатива, до 30 эпох, patience 5 (эпохи прогрева не считаются), эпоха по валидации.
 Варьируется: hard — ближайшие негативы с первой эпохи; warm — 10 эпох случайных, затем ближайшие.
 Варианты: без текста, Qwen-слагаемое, перемешанный Qwen-слагаемое. 5 фолдов × сиды 42–44.
 """
@@ -24,7 +24,7 @@ for arm, prefix in ARMS.items():
                     if l.startswith("  epochs:"):
                         l = "  epochs: 30"
                     elif l.startswith("  patience:"):
-                        l = "  patience: 30"
+                        l = "  patience: 5"
                     elif l.startswith("  experiment_name:"):
                         l = f"  experiment_name: neg1025-{arm}-{mode}-f{f}-s{s}"
                     out.append(l)

@@ -13,7 +13,7 @@ if [ "$1" = gate ]; then
   exit 0
 fi
 while [ ! -f "$OUT/ready" ]; do sleep 20; done
-for s in 42 43 44; do for f in 0 1 2 3 4; do for arm in add notext shufadd; do for mode in warm hard; do
+for s in ${NEG_SEEDS:-42}; do for f in 0 1 2 3 4; do for arm in add notext shufadd; do for mode in warm hard; do
   key="${arm}_${mode}_f${f}_s${s}"
   grep -q final_metrics "$OUT/$key.json" 2>/dev/null && continue
   mkdir "$OUT/.lock_$key" 2>/dev/null || continue
