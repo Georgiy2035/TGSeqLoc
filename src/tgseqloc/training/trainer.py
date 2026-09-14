@@ -280,6 +280,19 @@ def contrastive_loss(query: torch.Tensor, positive: torch.Tensor, negatives: tor
     return nn.functional.cross_entropy(logits, target)
 
 
+def epochs_without_improvement(previous: int, improved: bool, epoch: int, warmup: int) -> int:
+    """Epochs counted towards early stopping.
+
+    Warm-up epochs on random negatives do not count: validation grows slowly
+    there, and the run must reach the switch to the configured miner before
+    patience can end it. Without a warm-up this is the usual counter.
+    """
+
+    if improved:
+        return 0
+    return previous + 1 if epoch > warmup else previous
+
+
 def seed_everything(seed: int, *, deterministic: bool = True) -> torch.Generator:
     """Seed every generator a run draws from, and return one for DataLoader.
 
@@ -1149,9 +1162,7 @@ class Trainer:
             improved = metric > self.best_metric
             if improved:
                 self.best_metric = metric
-                no_improvement = 0
-            else:
-                no_improvement += 1
+            no_improvement = epochs_without_improvement(no_improvement, improved, epoch, warmup)
             checkpoint = self._checkpoint(epoch, metric, epoch_metrics)
             self._save_checkpoint(self.run_dir / "last_model.pth", checkpoint)
             if improved:
