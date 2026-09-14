@@ -228,6 +228,10 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     margin: float = 0.3
+    # "triplet" (hinge with margin) or "infonce" (softmax over the positive and
+    # the mined negatives, with temperature).
+    loss: str = "triplet"
+    temperature: float = 0.07
     negatives_per_query: int = 2
     hard_search_depth: int = 256
     # Keep database frames closer than this many metres out of a query's
@@ -448,6 +452,9 @@ class AppConfig:
                 raise ConfigError(f"{name} must be greater than zero")
         if self.training.weight_decay < 0:
             raise ConfigError("training.weight_decay must be non-negative")
+        _choice("training.loss", self.training.loss, ("triplet", "infonce"))
+        if not self.training.temperature > 0:
+            raise ConfigError("training.temperature must be greater than zero")
 
         _validate_recalls("training.recall_values", self.training.recall_values)
         _validate_recalls("retrieval.recall_values", self.retrieval.recall_values)

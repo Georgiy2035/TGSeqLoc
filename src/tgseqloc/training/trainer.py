@@ -262,6 +262,24 @@ def collate_graphs(items) -> Batch:
     return Batch.from_data_list(flat)
 
 
+def contrastive_loss(query: torch.Tensor, positive: torch.Tensor, negatives: torch.Tensor, temperature: float) -> torch.Tensor:
+    """InfoNCE over one positive and the mined negatives of each query.
+
+    ``query`` and ``positive`` are [B, D], ``negatives`` is [B, N, D], all
+    L2-normalized. The logits are cosine similarities divided by the
+    temperature, and the positive is the target class. Unlike the triplet
+    hinge, which is active or not per negative at a fixed margin, the loss
+    compares the positive with every negative at once and weights them by how
+    close they come, with no margin to sit at.
+    """
+
+    positive_logit = (query * positive).sum(dim=1, keepdim=True)
+    negative_logits = torch.einsum("bd,bnd->bn", query, negatives)
+    logits = torch.cat((positive_logit, negative_logits), dim=1) / temperature
+    target = torch.zeros(query.shape[0], dtype=torch.long, device=query.device)
+    return nn.functional.cross_entropy(logits, target)
+
+
 def seed_everything(seed: int, *, deterministic: bool = True) -> torch.Generator:
     """Seed every generator a run draws from, and return one for DataLoader.
 
@@ -1051,6 +1069,8 @@ class Trainer:
         criterion = nn.TripletMarginLoss(
             margin=float(self._training_value("margin", 0.3)), p=2
         )
+        loss_name = str(self._training_value("loss", "triplet"))
+        temperature = float(self._training_value("temperature", 0.07))
         epochs = int(self._training_value("epochs", 30))
         patience = int(self._training_value("patience", 7))
         no_improvement = 0
@@ -1085,13 +1105,16 @@ class Trainer:
                 query = embeddings[:, 0]
                 positive = embeddings[:, 1]
                 negatives = embeddings[:, 2:]
-                loss = criterion(
-                    query[:, None, :].expand_as(negatives).reshape(-1, self.model.out_dim),
-                    positive[:, None, :]
-                    .expand_as(negatives)
-                    .reshape(-1, self.model.out_dim),
-                    negatives.reshape(-1, self.model.out_dim),
-                )
+                if loss_name == "infonce":
+                    loss = contrastive_loss(query, positive, negatives, temperature)
+                else:
+                    loss = criterion(
+                        query[:, None, :].expand_as(negatives).reshape(-1, self.model.out_dim),
+                        positive[:, None, :]
+                        .expand_as(negatives)
+                        .reshape(-1, self.model.out_dim),
+                        negatives.reshape(-1, self.model.out_dim),
+                    )
                 assert self.optimizer is not None
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
