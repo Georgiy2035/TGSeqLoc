@@ -187,6 +187,32 @@ class PipelineRunner:
         metrics, _ = trainer.evaluate_test(checkpoint, write_results=True)
         return metrics
 
+    def transfer(self, checkpoint: str | Path) -> dict[str, Any]:
+        """Evaluate a checkpoint trained on other data on this test protocol.
+
+        Results go where this configuration's own run would write them.
+        """
+
+        from tgseqloc.training.trainer import seed_everything
+        from tgseqloc.training.transfer import evaluate_transfer
+
+        manifest, split = self._prepared_metadata()
+        seed_everything(
+            int(self.config.runtime.seed),
+            deterministic=bool(self.config.runtime.deterministic),
+        )
+        run_dir = Path(self.config.output.root).expanduser() / self.config.output.experiment_name
+        return evaluate_transfer(
+            asdict(self.config),
+            self.prepared_data_root,
+            manifest,
+            split,
+            checkpoint,
+            run_dir=run_dir if run_dir.is_absolute() else Path.cwd() / run_dir,
+            retriever_factory=registry.get("retriever", self.config.retrieval.retriever),
+            metric_factory=registry.get("metric", self.config.retrieval.metric),
+        )
+
     def run(self, **prepare_kwargs: Any) -> dict[str, Any]:
         """Run prepare, train, and final evaluation as one reproducible job."""
 

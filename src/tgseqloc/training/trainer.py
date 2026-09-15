@@ -575,6 +575,123 @@ def fit_text_center(paths: Sequence[str | Path], edge_attr_dim: int, text_emb_di
     )
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def manifest_fingerprint(manifest: Mapping[str, Any]) -> str:
+    """Identity of prepared data, as recorded in checkpoints trained on it."""
+
+    explicit = manifest.get("preprocess_fingerprint", manifest.get("fingerprint"))
+    if explicit is not None:
+        return str(explicit)
+    payload = json.dumps(_plain(manifest), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def manifest_records_by_path(
+    manifest: Mapping[str, Any], data_root: Path
+) -> dict[Path, Mapping[str, Any]]:
+    raw_records = manifest.get("graph_records")
+    if raw_records is None:
+        return {}
+    normalized: list[Mapping[str, Any]] = []
+    if isinstance(raw_records, Mapping):
+        for raw_path, value in raw_records.items():
+            if isinstance(value, Mapping):
+                record = dict(value)
+                record.setdefault("path", raw_path)
+            else:
+                record = {"path": raw_path, "sha256": value}
+            normalized.append(record)
+    elif isinstance(raw_records, Sequence) and not isinstance(
+        raw_records, (str, bytes)
+    ):
+        if not all(isinstance(record, Mapping) for record in raw_records):
+            raise ValueError("manifest graph_records entries must be mappings")
+        normalized = [dict(record) for record in raw_records]
+    else:
+        raise ValueError("manifest graph_records must be a mapping or sequence")
+
+    records: dict[Path, Mapping[str, Any]] = {}
+    for record in normalized:
+        raw_path = next(
+            (
+                record[key]
+                for key in ("path", "graph_path", "relative_path")
+                if record.get(key) is not None
+            ),
+            None,
+        )
+        if raw_path is None:
+            raise ValueError("manifest graph record is missing its path")
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path(data_root) / path
+        canonical = path.resolve()
+        if canonical in records:
+            raise ValueError(f"duplicate manifest graph record for {path}")
+        records[canonical] = record
+    return records
+
+
+def validate_graph_records(
+    manifest: Mapping[str, Any], data_root: Path, paths: Sequence[Path]
+) -> None:
+    """Check that every graph to be encoded is the one preparation wrote.
+
+    A graph is compared with the manifest by file hash and preprocessing
+    fingerprint, once, before any model work.
+    """
+
+    if "graph_records" not in manifest:
+        return
+    records = manifest_records_by_path(manifest, data_root)
+    expected_paths = {Path(path).resolve() for path in paths}
+    missing = sorted(str(path) for path in expected_paths - records.keys())
+    if missing:
+        preview = ", ".join(missing[:3])
+        suffix = " ..." if len(missing) > 3 else ""
+        raise ValueError(
+            f"split graph path is absent from manifest graph_records: "
+            f"{preview}{suffix}"
+        )
+    for path in sorted(expected_paths, key=str):
+        record = records[path]
+        if not path.is_file():
+            raise ValueError(f"manifest graph file does not exist: {path}")
+        expected_sha = record.get("sha256", record.get("file_sha256"))
+        if not isinstance(expected_sha, str) or not expected_sha:
+            raise ValueError(
+                f"manifest graph record has no SHA256 for {path}"
+            )
+        actual_sha = file_sha256(path)
+        if actual_sha != expected_sha:
+            raise ValueError(f"graph file SHA256 mismatch for {path}")
+        expected_fingerprint = record.get(
+            "expected_fingerprint",
+            record.get(
+                "preprocess_fingerprint",
+                record.get("fingerprint", manifest_fingerprint(manifest)),
+            ),
+        )
+        graph = _torch_load(path)
+        actual_fingerprint = (
+            graph.get("preprocess_fingerprint")
+            if isinstance(graph, Mapping)
+            else getattr(graph, "preprocess_fingerprint", None)
+        )
+        if actual_fingerprint != expected_fingerprint:
+            raise ValueError(
+                f"graph preprocessing fingerprint mismatch for {path}: "
+                f"expected {expected_fingerprint!r}, got {actual_fingerprint!r}"
+            )
+
+
 class Trainer:
     """End-to-end graph descriptor trainer for prepared TGSeqLoc data."""
 
@@ -696,102 +813,17 @@ class Trainer:
 
     @staticmethod
     def _file_sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+        return file_sha256(path)
 
     def _manifest_records_by_path(self) -> dict[Path, Mapping[str, Any]]:
-        raw_records = self.manifest.get("graph_records")
-        if raw_records is None:
-            return {}
-        normalized: list[Mapping[str, Any]] = []
-        if isinstance(raw_records, Mapping):
-            for raw_path, value in raw_records.items():
-                if isinstance(value, Mapping):
-                    record = dict(value)
-                    record.setdefault("path", raw_path)
-                else:
-                    record = {"path": raw_path, "sha256": value}
-                normalized.append(record)
-        elif isinstance(raw_records, Sequence) and not isinstance(
-            raw_records, (str, bytes)
-        ):
-            if not all(isinstance(record, Mapping) for record in raw_records):
-                raise ValueError("manifest graph_records entries must be mappings")
-            normalized = [dict(record) for record in raw_records]
-        else:
-            raise ValueError("manifest graph_records must be a mapping or sequence")
-
-        records: dict[Path, Mapping[str, Any]] = {}
-        for record in normalized:
-            raw_path = next(
-                (
-                    record[key]
-                    for key in ("path", "graph_path", "relative_path")
-                    if record.get(key) is not None
-                ),
-                None,
-            )
-            if raw_path is None:
-                raise ValueError("manifest graph record is missing its path")
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = self.data_root / path
-            canonical = path.resolve()
-            if canonical in records:
-                raise ValueError(f"duplicate manifest graph record for {path}")
-            records[canonical] = record
-        return records
+        return manifest_records_by_path(self.manifest, self.data_root)
 
     def _validate_manifest_graph_records(self) -> None:
         """Validate declared prepared graphs once before any model work."""
 
-        if "graph_records" not in self.manifest:
-            return
-        records = self._manifest_records_by_path()
-        expected_paths = {
-            path.resolve() for path in self.database_paths + self.query_paths
-        }
-        missing = sorted(str(path) for path in expected_paths - records.keys())
-        if missing:
-            preview = ", ".join(missing[:3])
-            suffix = " ..." if len(missing) > 3 else ""
-            raise ValueError(
-                f"split graph path is absent from manifest graph_records: "
-                f"{preview}{suffix}"
-            )
-        for path in sorted(expected_paths, key=str):
-            record = records[path]
-            if not path.is_file():
-                raise ValueError(f"manifest graph file does not exist: {path}")
-            expected_sha = record.get("sha256", record.get("file_sha256"))
-            if not isinstance(expected_sha, str) or not expected_sha:
-                raise ValueError(
-                    f"manifest graph record has no SHA256 for {path}"
-                )
-            actual_sha = self._file_sha256(path)
-            if actual_sha != expected_sha:
-                raise ValueError(f"graph file SHA256 mismatch for {path}")
-            expected_fingerprint = record.get(
-                "expected_fingerprint",
-                record.get(
-                    "preprocess_fingerprint",
-                    record.get("fingerprint", self.fingerprint),
-                ),
-            )
-            graph = _torch_load(path)
-            actual_fingerprint = (
-                graph.get("preprocess_fingerprint")
-                if isinstance(graph, Mapping)
-                else getattr(graph, "preprocess_fingerprint", None)
-            )
-            if actual_fingerprint != expected_fingerprint:
-                raise ValueError(
-                    f"graph preprocessing fingerprint mismatch for {path}: "
-                    f"expected {expected_fingerprint!r}, got {actual_fingerprint!r}"
-                )
+        validate_graph_records(
+            self.manifest, self.data_root, self.database_paths + self.query_paths
+        )
 
     def _manifest_int(self, *names: str, default=None) -> int:
         for name in names:
@@ -813,13 +845,7 @@ class Trainer:
 
     @property
     def fingerprint(self) -> str:
-        explicit = self.manifest.get(
-            "preprocess_fingerprint", self.manifest.get("fingerprint")
-        )
-        if explicit is not None:
-            return str(explicit)
-        payload = json.dumps(_plain(self.manifest), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return manifest_fingerprint(self.manifest)
 
     def _build_model(self) -> GATGraphEncoder:
         model_config = _get(self.config, "model", default={})

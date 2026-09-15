@@ -282,6 +282,26 @@ def build_vocabularies(
     return class_to_idx, edge_to_idx
 
 
+def load_vocabularies(manifest_path: str | Path) -> tuple[dict[str, int], dict[str, int]]:
+    """Node-class and relation vocabularies of an existing prepared dataset.
+
+    A class the other dataset never saw is absent here and is read as
+    ``unknown``, exactly as an unseen class of the same dataset would be.
+    """
+
+    manifest = load_json(manifest_path)
+    vocabularies = []
+    for key in ("node_class_to_idx", "edge_label_to_idx"):
+        vocabulary = manifest.get(key)
+        if not isinstance(vocabulary, dict) or vocabulary.get("unknown") != 0:
+            raise ValueError(f"{manifest_path} has no {key} with 'unknown' at index 0")
+        indices = sorted(int(index) for index in vocabulary.values())
+        if indices != list(range(len(indices))):
+            raise ValueError(f"{manifest_path}: {key} indices are not contiguous from 0")
+        vocabularies.append({str(name): int(index) for name, index in vocabulary.items()})
+    return vocabularies[0], vocabularies[1]
+
+
 def _nearest(records: Sequence[FrameRecord], timestamp: int, tolerance_ns: int) -> tuple[FrameRecord, int, bool]:
     stamps = [record.timestamp for record in records]
     position = bisect.bisect_left(stamps, timestamp)

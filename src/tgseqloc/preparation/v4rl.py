@@ -28,6 +28,7 @@ from tgseqloc.data.v4rl import (
     build_temporal_split,
     separate_by_ground_truth,
     build_vocabularies,
+    load_vocabularies,
     DEFAULT_OCR_FILE_NAME,
     discover_v4rl_records,
     parse_paddleocr,
@@ -68,6 +69,7 @@ def _normalize_config(config: Any) -> Any:
         "ocr_file_name": _get(dataset, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
         "traversals": _get(dataset, "traversals"),
         "ins_path_template": _get(dataset, "ins_path_template"),
+        "poses_path_template": _get(dataset, "poses_path_template", ""),
         "image_path_template": _get(dataset, "image_path_template"),
         "frame_list_path": _get(dataset, "frame_list_path"),
         "split_guard": _get(dataset, "split_guard", ""),
@@ -78,6 +80,7 @@ def _normalize_config(config: Any) -> Any:
         "split_fold": int(_get(dataset, "split_fold", -1)),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
         "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
+        "vocabulary_manifest": _get(preprocess, "vocabulary_manifest", ""),
         "symmetric_scene_edges": bool(_get(preprocess, "symmetric_scene_edges", False)),
         "scene_graph_root_template": _get(dataset, "scene_graph_root_template"),
         "gt_path": _get(dataset, "gt_path"),
@@ -616,7 +619,7 @@ def _graph_value(graph: Any, key: str, default: Any = None) -> Any:
 
 
 
-SUPPORTED_DATASETS = frozenset({"v4rl", "robotcar"})
+SUPPORTED_DATASETS = frozenset({"v4rl", "robotcar", "pervomay"})
 
 
 def write_v4rl_split(
@@ -728,7 +731,13 @@ def process_v4rl(
         else None
     )
     dynamic_node_classes = tuple(_get(config, "dynamic_node_classes", ()) or ())
-    class_to_idx, edge_label_to_idx = build_vocabularies(records, dynamic_node_classes)
+    vocabulary_manifest = _get(config, "vocabulary_manifest")
+    if vocabulary_manifest:
+        # A model reads class ids by position: evaluating one trained on another
+        # dataset needs that dataset's vocabulary, not one built from these graphs.
+        class_to_idx, edge_label_to_idx = load_vocabularies(vocabulary_manifest)
+    else:
+        class_to_idx, edge_label_to_idx = build_vocabularies(records, dynamic_node_classes)
     source_identities = build_source_identities(records, _get(config, "gt_path"))
     for backend, implementation in {
         "OCR source": ocr_parser,

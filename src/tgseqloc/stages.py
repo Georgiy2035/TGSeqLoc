@@ -277,6 +277,27 @@ def _discover_frames(config: Any) -> list[tuple[str, str, Path]]:
                 ),
             )
         ]
+    if adapter == "pervomay":
+        from tgseqloc.data.pervomay import discover_pervomay_records
+        from tgseqloc.data.robotcar import load_frame_list
+
+        return [
+            (record.sequence, record.stem, record.image_path)
+            for record in discover_pervomay_records(
+                config.dataset.ocr_root_template,
+                config.dataset.scene_graph_root_template,
+                config.dataset.poses_path_template,
+                dict(config.dataset.traversals),
+                image_path_template=config.dataset.image_path_template,
+                ocr_file_name=config.dataset.ocr_file_name,
+                require_inputs=False,
+                frame_list=(
+                    load_frame_list(config.dataset.frame_list_path)
+                    if config.dataset.frame_list_path
+                    else None
+                ),
+            )
+        ]
     raise RuntimeError(f"no frame discovery for dataset adapter {adapter!r}")
 
 

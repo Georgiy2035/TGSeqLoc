@@ -79,6 +79,18 @@ def evaluate(
 
 
 @app.command()
+def transfer(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    checkpoint: Path = typer.Option(
+        ..., exists=True, dir_okay=False, help="Checkpoint trained on other data."
+    ),
+) -> None:
+    """Evaluate a checkpoint trained on another dataset, without training."""
+
+    _execute(config, lambda runner: runner.transfer(checkpoint))
+
+
+@app.command()
 def run(
     config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
 ) -> None:

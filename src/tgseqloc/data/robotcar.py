@@ -280,8 +280,8 @@ def positions_for(records: Sequence[FrameRecord], track: Track) -> dict[int, tup
 
 
 def build_radius_positives(
-    query_positions: Mapping[int, tuple[float, float]],
-    database_positions: Mapping[int, tuple[float, float]],
+    query_positions: Mapping[int, Sequence[float]],
+    database_positions: Mapping[int, Sequence[float]],
     radius: float = DEFAULT_RADIUS_M,
 ) -> dict[int, list[int]]:
     """Database frames recorded within ``radius`` metres of each query.
@@ -289,7 +289,8 @@ def build_radius_positives(
     Metric ground truth replaces V4RL's correspondence file, which is what lets
     a query have several right answers instead of exactly one -- and what makes
     "no correct match exists" a statement about coverage rather than about a
-    missing line in a file.
+    missing line in a file. Positions may have any number of coordinates, all
+    in metres: RobotCar gives northing and easting, Pervomayskaya three axes.
     """
 
     if radius <= 0:
@@ -297,14 +298,14 @@ def build_radius_positives(
     database = sorted(database_positions.items(), key=lambda item: item[1][0])
     northings = [position[0] for _, position in database]
     positives: dict[int, list[int]] = {}
-    for query_index, (north, east) in query_positions.items():
-        low = bisect.bisect_left(northings, north - radius)
-        high = bisect.bisect_right(northings, north + radius)
+    for query_index, point in query_positions.items():
+        low = bisect.bisect_left(northings, point[0] - radius)
+        high = bisect.bisect_right(northings, point[0] + radius)
         near = [
             index
             for index, position in database[low:high]
-            if abs(position[1] - east) <= radius
-            and math.dist(position, (north, east)) <= radius
+            if all(abs(a - b) <= radius for a, b in zip(position[1:], point[1:]))
+            and math.dist(position, point) <= radius
         ]
         if near:
             positives[query_index] = sorted(near)

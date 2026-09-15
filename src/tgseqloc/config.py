@@ -59,6 +59,8 @@ class DatasetConfig:
     # file, so the radius belongs to the dataset, not to the training protocol.
     traversals: dict[str, str] = field(default_factory=dict)
     ins_path_template: str = ""
+    # Pervomayskaya: each walk's poses.csv, one camera pose per image.
+    poses_path_template: str = ""
     image_path_template: str = ""
     # Which frames the experiment uses, one stem per line. Empty takes every
     # frame that has both recognized text and a scene graph.
@@ -171,6 +173,10 @@ class PreprocessConfig:
     # node, which is what V4RL used; RobotCar needs it because half of all
     # graph nodes there are vehicles and people.
     dynamic_node_classes: list[str] = field(default_factory=list)
+    # Prepared manifest whose node-class and relation vocabularies to use
+    # instead of building them from this dataset's graphs; needed to evaluate a
+    # model trained on another dataset. Empty builds them here.
+    vocabulary_manifest: str = ""
     # Add the reverse of every scene relation. Off by default: every
     # reported result was produced without it.
     symmetric_scene_edges: bool = False
