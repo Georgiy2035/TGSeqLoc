@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import random
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,7 @@ class TripletGraphDataset(Dataset):
         seed: int = 0,
         edge_attr_dim: int | None = None,
         ignored: Mapping[int, Sequence[int]] | Mapping[str, Sequence[int]] | None = None,
+        groups: tuple[Mapping[int, str], Sequence[str]] | None = None,
     ) -> None:
         if negatives_per_query < 1:
             raise ValueError("negatives_per_query must be positive")
@@ -187,6 +189,9 @@ class TripletGraphDataset(Dataset):
             if ignored is None
             else {int(k): [int(v) for v in values] for k, values in ignored.items()}
         )
+        # (camera of each query, camera of each database frame): when given, a
+        # negative drawn without mining comes from the query's own camera.
+        self.groups = groups
         self.query_indices = []
         for query_index in map(int, query_indices):
             positive = set(self.positives.get(query_index, ()))
@@ -235,6 +240,7 @@ class TripletGraphDataset(Dataset):
                 index
                 for index in range(len(self.database_paths))
                 if index not in blocked
+                and (self.groups is None or self.groups[1][index] == self.groups[0][query_index])
             ]
             rng.shuffle(negatives)
         if len(negatives) < self.negatives_per_query:
@@ -278,6 +284,70 @@ def contrastive_loss(query: torch.Tensor, positive: torch.Tensor, negatives: tor
     logits = torch.cat((positive_logit, negative_logits), dim=1) / temperature
     target = torch.zeros(query.shape[0], dtype=torch.long, device=query.device)
     return nn.functional.cross_entropy(logits, target)
+
+
+def frame_group(path: str | Path) -> str:
+    """Camera of a prepared frame: the prefix of ``<camera>-<timestamp>``, empty for the primary camera."""
+
+    stem = Path(path).stem
+    return stem.split("-", 1)[0] if "-" in stem else ""
+
+
+def mine_within_groups(
+    miner,
+    database_embeddings,
+    query_embeddings,
+    query_indices: Sequence[int],
+    positives: Mapping[int, Sequence[int]],
+    negatives_per_query: int,
+    search_depth: int,
+    seed: int,
+    *,
+    database_groups: Sequence[str],
+    query_groups: Mapping[int, str],
+    exclusions: Mapping[int, Sequence[int]] | None = None,
+) -> dict[int, list[int]]:
+    """Run ``miner`` separately inside each camera.
+
+    Each query sees only the database frames of its own camera: the miner gets
+    that camera's descriptors, with positives and exclusions translated to local
+    indices, and its answer is translated back. With the same seed for every
+    camera the result for a camera does not depend on the others.
+    """
+
+    database = np.asarray(database_embeddings)
+    queries = np.asarray(query_embeddings)
+    rows_by_group: dict[str, list[int]] = defaultdict(list)
+    for row, query_index in enumerate(query_indices):
+        rows_by_group[query_groups[int(query_index)]].append(row)
+    members: dict[str, list[int]] = defaultdict(list)
+    for index, group in enumerate(database_groups):
+        members[group].append(index)
+    mined: dict[int, list[int]] = {}
+    for group, rows in rows_by_group.items():
+        local = members.get(group, [])
+        if not local:
+            mined.update({int(query_indices[row]): [] for row in rows})
+            continue
+        to_local = {index: position for position, index in enumerate(local)}
+        group_queries = [int(query_indices[row]) for row in rows]
+        local_positives = {
+            query: [to_local[item] for item in positives.get(query, ()) if item in to_local]
+            for query in group_queries
+        }
+        kwargs = {}
+        if exclusions is not None:
+            kwargs["exclusions"] = {
+                query: [to_local[item] for item in exclusions.get(query, ()) if item in to_local]
+                for query in group_queries
+            }
+        found = miner(
+            database[local], queries[rows], group_queries, local_positives,
+            negatives_per_query, search_depth, seed, **kwargs,
+        )
+        for query, items in found.items():
+            mined[int(query)] = [local[item] for item in items]
+    return mined
 
 
 def epochs_without_improvement(previous: int, improved: bool, epoch: int, warmup: int) -> int:
@@ -1059,6 +1129,20 @@ class Trainer:
                 self.split, self.train_query_indices, positive_radius
             )
             ignored = self.positives
+        # Triplets inside one camera: a side frame and a front frame at the same
+        # spot look at different things, so the positive and the negatives are
+        # taken from the query's own camera. Evaluation is left unchanged.
+        same_camera = bool(self._training_value("same_camera_triplets", False))
+        groups = None
+        if same_camera:
+            database_groups = [frame_group(path) for path in self.database_paths]
+            query_groups = {index: frame_group(path) for index, path in enumerate(self.query_paths)}
+            groups = (query_groups, database_groups)
+            train_positives = {
+                query: kept
+                for query, values in train_positives.items()
+                if (kept := [item for item in values if database_groups[int(item)] == query_groups[int(query)]])
+            }
         dataset = TripletGraphDataset(
             self.database_paths,
             self.query_paths,
@@ -1070,6 +1154,7 @@ class Trainer:
             seed,
             self.edge_attr_dim,
             **({"ignored": ignored} if ignored is not None else {}),
+            **({"groups": groups} if groups is not None else {}),
         )
         if not dataset:
             raise ValueError("no train query has both positives and negative candidates")
@@ -1105,7 +1190,7 @@ class Trainer:
             # equal, the "hardest" negatives are indistinguishable from the query
             # and the triplet loss stays at its margin.
             miner = random_negatives if epoch <= warmup else self.miner
-            hard = miner(
+            mine_args = (
                 database_embeddings,
                 query_embeddings,
                 dataset.query_indices,
@@ -1113,8 +1198,14 @@ class Trainer:
                 negatives_per_query,
                 int(self._training_value("hard_search_depth", 256)),
                 seed + epoch,
-                **({"exclusions": exclusions} if exclusions is not None else {}),
             )
+            mine_kwargs = {"exclusions": exclusions} if exclusions is not None else {}
+            if groups is not None:
+                hard = mine_within_groups(
+                    miner, *mine_args, database_groups=groups[1], query_groups=groups[0], **mine_kwargs
+                )
+            else:
+                hard = miner(*mine_args, **mine_kwargs)
             dataset.set_epoch(epoch)
             dataset.set_hard_negatives(hard)
             self.model.train()

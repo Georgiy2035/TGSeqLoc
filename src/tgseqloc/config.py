@@ -253,6 +253,9 @@ class TrainingConfig:
     miner: str = "hard_negative"
     # Epochs at the start that use random negatives instead of ``miner``.
     miner_warmup_epochs: int = 0
+    # Take the positive and the negatives of a triplet from the query's own
+    # camera (several RobotCar cameras); evaluation is unchanged.
+    same_camera_triplets: bool = False
     recall_values: list[int] = field(default_factory=lambda: [1, 5, 10])
     early_stopping_metric: str = "R@5"
     resume_from: Path | None = None
