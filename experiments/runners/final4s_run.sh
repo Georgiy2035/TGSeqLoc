@@ -21,7 +21,7 @@ if [ "$1" = gate ]; then
   touch "$OUT/ready"; exit 0
 fi
 while [ ! -f "$OUT/ready" ]; do sleep 60; done
-for s in 42 43 44; do for f in 0 1 2 3 4; do for arm in add notext; do
+for s in ${FINAL_SEEDS:-42}; do for f in 0 1 2 3 4; do for arm in add notext; do
   key="${arm}_f${f}_s${s}"; name="final4s-$arm-f$f-s$s"
   grep -q final_metrics "$OUT/$key.json" 2>/dev/null && continue
   mkdir "$OUT/.lock_$key" 2>/dev/null || continue
