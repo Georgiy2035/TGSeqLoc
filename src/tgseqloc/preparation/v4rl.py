@@ -26,6 +26,7 @@ from tgseqloc.data.v4rl import (
     build_gt_mapping,
     build_positive_intervals,
     build_temporal_split,
+    separate_by_ground_truth,
     build_vocabularies,
     DEFAULT_OCR_FILE_NAME,
     discover_v4rl_records,
@@ -69,6 +70,7 @@ def _normalize_config(config: Any) -> Any:
         "ins_path_template": _get(dataset, "ins_path_template"),
         "image_path_template": _get(dataset, "image_path_template"),
         "frame_list_path": _get(dataset, "frame_list_path"),
+        "split_guard": _get(dataset, "split_guard", ""),
         "cameras": _get(dataset, "cameras"),
         "primary_camera": _get(dataset, "primary_camera", "stereo_centre"),
         "camera_fold_max_gap_s": _get(dataset, "camera_fold_max_gap_s", 0.3),
@@ -645,6 +647,8 @@ def write_v4rl_split(
         validation_ratio=float(_get(config, "validation_ratio", 0.1)),
         require_nonempty=False,
     )
+    if str(_get(config, "split_guard", "") or "") == "ground_truth_overlap":
+        split = separate_by_ground_truth(split)
     reference_sequence = mapping["reference_sequence"]
     reference_records = [
         record for record in records if record.sequence == reference_sequence

@@ -63,6 +63,9 @@ class DatasetConfig:
     # Which frames the experiment uses, one stem per line. Empty takes every
     # frame that has both recognized text and a scene graph.
     frame_list_path: str = ""
+    # V4RL: "ground_truth_overlap" drops validation and test queries whose
+    # ground-truth reference frames are shared with an earlier part.
+    split_guard: str = ""
     # RobotCar: several cameras as extra frames of the same traversals, each
     # {name: {ocr_root_template, scene_graph_root_template, image_path_template,
     # frame_list_path}} overriding the top-level values; empty for one camera.
@@ -249,6 +252,9 @@ class TrainingConfig:
     # truth). Frames between it and the ground-truth radius are left out of
     # training; evaluation still uses the whole ground truth.
     positive_max_distance_m: float = 0.0
+    # Interval ground truth (V4RL): train only on this central fraction of each
+    # query's interval of positives; the edges take no part in training.
+    positive_interval_fraction: float = 0.0
     max_grad_norm: float = 5.0
     miner: str = "hard_negative"
     # Epochs at the start that use random negatives instead of ``miner``.
@@ -466,6 +472,11 @@ class AppConfig:
         if self.training.weight_decay < 0:
             raise ConfigError("training.weight_decay must be non-negative")
         _choice("training.loss", self.training.loss, ("triplet", "infonce"))
+        if not 0.0 <= self.training.positive_interval_fraction <= 1.0:
+            raise ConfigError("training.positive_interval_fraction must be in [0, 1]")
+        if self.training.positive_interval_fraction > 0 and self.training.positive_max_distance_m > 0:
+            raise ConfigError("positive_interval_fraction and positive_max_distance_m exclude each other")
+        _choice("dataset.split_guard", self.dataset.split_guard or "none", ("none", "ground_truth_overlap"))
         if self.training.miner_warmup_epochs < 0:
             raise ConfigError("training.miner_warmup_epochs must be non-negative")
         if not self.training.temperature > 0:

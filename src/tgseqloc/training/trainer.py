@@ -529,6 +529,29 @@ def training_positives(
     return {q: v for q, v in kept.items() if v}
 
 
+def central_positives(
+    positives: Mapping[int, Sequence[int]], query_indices: Sequence[int], fraction: float
+) -> dict[int, list[int]]:
+    """The central part of each query's interval of positives, for training.
+
+    The analogue of positives within 10 m of 25 m where ground truth is an
+    interval of reference frames rather than a distance: the frames nearest the
+    middle of the interval are trained as positives, the edges of the interval
+    are neither pulled in nor pushed away, and evaluation keeps the whole
+    interval. At least one frame is kept.
+    """
+
+    kept: dict[int, list[int]] = {}
+    for query in map(int, query_indices):
+        values = sorted(int(v) for v in positives.get(query, positives.get(str(query), ())))  # type: ignore[arg-type]
+        if not values:
+            continue
+        count = max(1, int(round(len(values) * float(fraction))))
+        start = (len(values) - count) // 2
+        kept[query] = values[start:start + count]
+    return kept
+
+
 def text_center_from_graphs(graphs, text_emb_dim: int) -> torch.Tensor:
     """Mean embedding of every string in ``graphs``; zeros when there is none."""
 
@@ -1128,6 +1151,12 @@ class Trainer:
             train_positives = training_positives(
                 self.split, self.train_query_indices, positive_radius
             )
+            ignored = self.positives
+        interval_fraction = float(self._training_value("positive_interval_fraction", 0.0) or 0.0)
+        if interval_fraction > 0:
+            if positive_radius > 0:
+                raise ValueError("positive_interval_fraction and positive_max_distance_m exclude each other")
+            train_positives = central_positives(self.positives, self.train_query_indices, interval_fraction)
             ignored = self.positives
         # Triplets inside one camera: a side frame and a front frame at the same
         # spot look at different things, so the positive and the negatives are

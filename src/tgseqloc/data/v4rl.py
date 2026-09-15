@@ -435,6 +435,41 @@ def build_temporal_split(
     }
 
 
+def separate_by_ground_truth(split: Mapping[str, Any]) -> dict[str, Any]:
+    """Make the parts of a V4RL split share no ground-truth database frame.
+
+    Validation is the tail of the training segment and the test follows it, so
+    queries on either side of a cut look at the same stretch of the reference
+    sequence, and a place revisited later in the query sequence can land in the
+    test while its first visit trained the model. V4RL gives no metric
+    positions, but its ground truth is a set of reference frames per query:
+    a validation query is dropped when one of its positives is a positive of a
+    training query, and a test query when one of its positives belongs to a
+    training or a kept validation query. The dropped queries are recorded.
+    """
+
+    positives = {int(k): {int(v) for v in values} for k, values in split["positives"].items()}
+    train = [int(i) for i in split["train_query_indices"]]
+    seen = set().union(*(positives.get(i, set()) for i in train)) if train else set()
+    validation, dropped_validation = [], []
+    for index in split["validation_query_indices"]:
+        (dropped_validation if positives.get(int(index), set()) & seen else validation).append(int(index))
+    seen_before_test = seen.union(*(positives.get(i, set()) for i in validation)) if validation else seen
+    test, dropped_test = [], []
+    for index in split["test_query_indices"]:
+        (dropped_test if positives.get(int(index), set()) & seen_before_test else test).append(int(index))
+    if not test:
+        raise RuntimeError("separating the split by ground truth left no test query")
+    return {
+        **dict(split),
+        "validation_query_indices": validation,
+        "test_query_indices": test,
+        "excluded_validation_indices": dropped_validation,
+        "excluded_test_indices": dropped_test,
+        "split_guard": "ground_truth_overlap",
+    }
+
+
 def build_split(
     data_root: str | Path,
     mapping: Mapping[str, Any],
