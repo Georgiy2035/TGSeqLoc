@@ -373,6 +373,9 @@ def encode_paths(
     outputs = [model(batch.to(device)).detach().cpu() for batch in loader]
     out_dim = int(getattr(model, "out_dim", 0))
     result = torch.cat(outputs) if outputs else torch.empty((0, out_dim))
+    if result.shape[0] != len(paths):
+        # A silent mismatch would pair descriptors with the wrong frames.
+        raise RuntimeError(f"encoded {result.shape[0]} descriptors for {len(paths)} graphs")
     return result.numpy().astype(np.float32) if as_numpy else result
 
 

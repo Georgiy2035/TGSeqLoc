@@ -329,10 +329,19 @@ class GATGraphEncoder(nn.Module):
         graph_index = getattr(batch, "batch", None)
         if graph_index is None:
             graph_index = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+            graphs = 1
         else:
             graph_index = graph_index.to(x.device)
+            graphs = int(getattr(batch, "num_graphs", int(graph_index.max()) + 1))
+        # The number of graphs is passed explicitly: a frame whose graph has no
+        # node at all would otherwise get no row, and every later descriptor in
+        # the batch would shift onto the wrong frame.
         pooled = torch.cat(
-            (global_mean_pool(h, graph_index), global_max_pool(h, graph_index)), dim=1
+            (
+                global_mean_pool(h, graph_index, size=graphs),
+                global_max_pool(h, graph_index, size=graphs),
+            ),
+            dim=1,
         )
         descriptor = F.normalize(self._project(pooled), p=2, dim=1)
         return (descriptor, attention) if return_attn else descriptor
