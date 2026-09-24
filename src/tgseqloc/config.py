@@ -68,6 +68,10 @@ class DatasetConfig:
     # V4RL: "ground_truth_overlap" drops validation and test queries whose
     # ground-truth reference frames are shared with an earlier part.
     split_guard: str = ""
+    # V4RL with split_guard "ground_truth_blocks": centres of the validation
+    # blocks as fractions of the annotated queries before the test; together
+    # the blocks take validation_ratio of those queries.
+    validation_centres: list[float] = field(default_factory=list)
     # RobotCar: several cameras as extra frames of the same traversals, each
     # {name: {ocr_root_template, scene_graph_root_template, image_path_template,
     # frame_list_path}} overriding the top-level values; empty for one camera.
@@ -79,6 +83,12 @@ class DatasetConfig:
     # Written block cross-validation assignment; empty means a single time cut.
     split_folds_path: str = ""
     split_fold: int = -1
+    # >0 включает K-кратную кросс-валидацию по треку запросов вместо
+    # разбиения из файла. Пока используется Первомайской.
+    split_fold_count: int = 0
+    # Сколько первых координат позы участвуют в метрике. 0 — все.
+    # Первомайская ставит 2: третья координата там плывёт.
+    gt_dimensions: int = 0
     gt_radius_m: float = 25.0
     scene_graph_root_template: str = "data/scene_graphs/{sequence}"
     gt_path: Path = Path("data/V4RL/gt/gt_shop_street_1.txt")
@@ -482,7 +492,13 @@ class AppConfig:
             raise ConfigError("training.positive_interval_fraction must be in [0, 1]")
         if self.training.positive_interval_fraction > 0 and self.training.positive_max_distance_m > 0:
             raise ConfigError("positive_interval_fraction and positive_max_distance_m exclude each other")
-        _choice("dataset.split_guard", self.dataset.split_guard or "none", ("none", "ground_truth_overlap"))
+        _choice("dataset.split_guard", self.dataset.split_guard or "none", ("none", "ground_truth_overlap", "ground_truth_blocks"))
+        if (self.dataset.split_guard == "ground_truth_blocks") != bool(self.dataset.validation_centres):
+            raise ConfigError("dataset.validation_centres are required by, and only by, split_guard 'ground_truth_blocks'")
+        if any(not 0.0 < c < 1.0 for c in self.dataset.validation_centres):
+            raise ConfigError("dataset.validation_centres must lie in (0, 1)")
+        if list(self.dataset.validation_centres) != sorted(set(self.dataset.validation_centres)):
+            raise ConfigError("dataset.validation_centres must be increasing")
         if self.training.miner_warmup_epochs < 0:
             raise ConfigError("training.miner_warmup_epochs must be non-negative")
         if not self.training.temperature > 0:

@@ -15,6 +15,7 @@ from typing import Any
 
 from tgseqloc.data.formats import FrameRecord
 from tgseqloc.data.pervomay import (
+    build_cross_validation_split,
     build_evaluation_split,
     discover_pervomay_records,
     load_poses,
@@ -70,8 +71,21 @@ def write_pervomay_split(
         for role in traversals
     }
 
+    dimensions = int(_get(settings, "gt_dimensions", 0) or 0)
+    if dimensions:
+        positions = {
+            role: {index: tuple(point[:dimensions]) for index, point in mapping.items()}
+            for role, mapping in positions.items()
+        }
     positives = build_radius_positives(positions[query], positions[reference], radius)
-    split = build_evaluation_split(positions[query], positives)
+    fold_count = int(_get(settings, "split_fold_count", 0) or 0)
+    if fold_count:
+        split = build_cross_validation_split(
+            positions[query], positives,
+            folds=fold_count, test_fold=int(_get(settings, "split_fold", 0) or 0),
+        )
+    else:
+        split = build_evaluation_split(positions[query], positives)
     by_sequence = {
         role: [record for record in records if record.sequence == role] for role in traversals
     }
@@ -83,6 +97,8 @@ def write_pervomay_split(
     ]
     split["reference_sequence"] = reference
     split["query_sequence"] = query
+    # Тренер берёт размерность отсюда, чтобы не разойтись с подготовкой.
+    split["gt_dimensions"] = dimensions
     split["query_positions"] = {
         str(index): [float(value) for value in point] for index, point in positions[query].items()
     }
@@ -93,6 +109,19 @@ def write_pervomay_split(
     split["queries_without_positives"] = sum(
         1 for index in positions[query] if not positives.get(index)
     )
+    if fold_count:
+        # Графы от фолда не зависят, поэтому одной подготовкой пишем все K
+        # разбиений: гонять её K раз ради одних и тех же .pt незачем.
+        for index in range(fold_count):
+            other = build_cross_validation_split(
+                positions[query], positives, folds=fold_count, test_fold=index
+            )
+            for key in ("database_paths", "query_paths", "reference_sequence",
+                        "query_sequence", "query_positions", "database_positions",
+                        "queries_without_positives", "gt_dimensions"):
+                if key in split:
+                    other[key] = split[key]
+            save_json(other, mappings_root / f"split_fold{index}.json")
     save_json(split, mappings_root / "temporal_split.json")
 
     digest = hashlib.sha256(
@@ -101,7 +130,7 @@ def write_pervomay_split(
     descriptor = {
         "kind": "metric_radius",
         "radius_m": radius,
-        "dimensions": 3,
+        "dimensions": dimensions or 3,
         "reference_sequence": reference,
         "query_sequence": query,
         "traversals": traversals,

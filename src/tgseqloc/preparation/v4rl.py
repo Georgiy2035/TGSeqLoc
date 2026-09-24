@@ -25,6 +25,7 @@ from tgseqloc.data.v4rl import (
     DEFAULT_NOOP_TEXTS,
     build_gt_mapping,
     build_positive_intervals,
+    build_block_split,
     build_temporal_split,
     separate_by_ground_truth,
     build_vocabularies,
@@ -73,11 +74,16 @@ def _normalize_config(config: Any) -> Any:
         "image_path_template": _get(dataset, "image_path_template"),
         "frame_list_path": _get(dataset, "frame_list_path"),
         "split_guard": _get(dataset, "split_guard", ""),
+        "validation_centres": list(_get(dataset, "validation_centres", []) or []),
         "cameras": _get(dataset, "cameras"),
         "primary_camera": _get(dataset, "primary_camera", "stereo_centre"),
         "camera_fold_max_gap_s": _get(dataset, "camera_fold_max_gap_s", 0.3),
         "split_folds_path": _get(dataset, "split_folds_path", ""),
         "split_fold": int(_get(dataset, "split_fold", -1)),
+        # Белый список: ключ, которого тут нет, до адаптера не доедет
+        # молча, со значением по умолчанию.
+        "split_fold_count": int(_get(dataset, "split_fold_count", 0) or 0),
+        "gt_dimensions": int(_get(dataset, "gt_dimensions", 0) or 0),
         "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
         "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
         "vocabulary_manifest": _get(preprocess, "vocabulary_manifest", ""),
@@ -644,14 +650,23 @@ def write_v4rl_split(
     positives = build_positive_intervals(
         mapping, query_records, interpolate=bool(_get(config, "interpolate_gt", False))
     )
-    split = build_temporal_split(
-        len(query_records), positives,
-        test_ratio=float(_get(config, "test_ratio", 0.2)),
-        validation_ratio=float(_get(config, "validation_ratio", 0.1)),
-        require_nonempty=False,
-    )
-    if str(_get(config, "split_guard", "") or "") == "ground_truth_overlap":
-        split = separate_by_ground_truth(split)
+    guard = str(_get(config, "split_guard", "") or "")
+    if guard == "ground_truth_blocks":
+        split = build_block_split(
+            len(query_records), positives,
+            test_ratio=float(_get(config, "test_ratio", 0.2)),
+            validation_ratio=float(_get(config, "validation_ratio", 0.1)),
+            validation_centres=[float(c) for c in _get(config, "validation_centres", [])],
+        )
+    else:
+        split = build_temporal_split(
+            len(query_records), positives,
+            test_ratio=float(_get(config, "test_ratio", 0.2)),
+            validation_ratio=float(_get(config, "validation_ratio", 0.1)),
+            require_nonempty=False,
+        )
+        if guard == "ground_truth_overlap":
+            split = separate_by_ground_truth(split)
     reference_sequence = mapping["reference_sequence"]
     reference_records = [
         record for record in records if record.sequence == reference_sequence

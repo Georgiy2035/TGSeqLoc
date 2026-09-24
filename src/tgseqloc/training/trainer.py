@@ -495,8 +495,14 @@ def negative_exclusions(
     from tgseqloc.data.robotcar import build_radius_positives
 
     wanted = {int(index) for index in query_indices}
-    queries = {int(k): (float(v[0]), float(v[1])) for k, v in query_positions.items() if int(k) in wanted}
-    database = {int(k): (float(v[0]), float(v[1])) for k, v in database_positions.items()}
+    # Ровно те координаты, по которым посчитан сам ground truth: число
+    # записано в сплит подготовкой. Считать здесь по другому числу осей
+    # значило бы отбирать негативы по одной метрике, а мерить по другой.
+    dimensions = int(split.get("gt_dimensions", 0) or 0)
+    cut = (lambda v: tuple(float(x) for x in v)[:dimensions]) if dimensions else (
+        lambda v: tuple(float(x) for x in v))
+    queries = {int(k): cut(v) for k, v in query_positions.items() if int(k) in wanted}
+    database = {int(k): cut(v) for k, v in database_positions.items()}
     return build_radius_positives(queries, database, float(radius))
 
 
@@ -521,8 +527,14 @@ def training_positives(
     from tgseqloc.data.robotcar import build_radius_positives
 
     wanted = {int(index) for index in query_indices}
-    queries = {int(k): (float(v[0]), float(v[1])) for k, v in query_positions.items() if int(k) in wanted}
-    database = {int(k): (float(v[0]), float(v[1])) for k, v in database_positions.items()}
+    # Ровно те координаты, по которым посчитан сам ground truth: число
+    # записано в сплит подготовкой. Считать здесь по другому числу осей
+    # значило бы отбирать негативы по одной метрике, а мерить по другой.
+    dimensions = int(split.get("gt_dimensions", 0) or 0)
+    cut = (lambda v: tuple(float(x) for x in v)[:dimensions]) if dimensions else (
+        lambda v: tuple(float(x) for x in v))
+    queries = {int(k): cut(v) for k, v in query_positions.items() if int(k) in wanted}
+    database = {int(k): cut(v) for k, v in database_positions.items()}
     ground_truth = {int(k): {int(x) for x in v} for k, v in split.get("positives", {}).items()}
     near = build_radius_positives(queries, database, float(radius))
     kept = {q: sorted(set(v) & ground_truth.get(q, set())) for q, v in near.items()}
@@ -762,8 +774,11 @@ class Trainer:
         """
 
         folds_path = _get(self.config, "dataset.split_folds_path", default="")
+        # Фолды задаются либо файлом разбиения, либо их числом: у RobotCar
+        # первое, у Первомайской второе. Проверка одна и та же.
+        fold_count = int(_get(self.config, "dataset.split_fold_count", default=0) or 0)
         recorded = self.split.get("split_fold")
-        if folds_path:
+        if folds_path or fold_count:
             expected = int(_get(self.config, "dataset.split_fold", default=-1))
             if recorded is None or int(recorded) != expected:
                 raise ValueError(

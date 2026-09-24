@@ -490,6 +490,79 @@ def separate_by_ground_truth(split: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_block_split(
+    query_count: int,
+    positives: Mapping[int, Sequence[int]],
+    *,
+    test_ratio: float = 0.2,
+    validation_ratio: float = 0.1,
+    validation_centres: Sequence[float],
+) -> dict[str, Any]:
+    """A V4RL split whose validation is several blocks spread along the route.
+
+    Recall along the V4RL route changes by tens of points from one hundred
+    queries to the next: a model without text found 1 % of one stretch and
+    91 % of its neighbour. A validation set that is one contiguous stretch
+    therefore measures where it happens to lie, and the epoch it selects is
+    close to random. Blocks centred at fixed fractions of the route average
+    over places; their positions are a rule, not a choice made by looking at
+    results.
+
+    The test is the tail of the query sequence, as in the temporal split, and
+    is kept whole. Ground truth is a set of reference frames per query, and the
+    parts must not share one: validation queries sharing a frame with the test
+    are dropped, then training queries sharing a frame with the test or with
+    the kept validation. Training pays for the separation, so that the sets
+    that are measured stay the size the protocol names.
+    """
+
+    if not validation_centres:
+        raise ValueError("validation_centres must name at least one block")
+    if not 0 < test_ratio < 1 or not 0 < validation_ratio < 1:
+        raise ValueError("split ratios must satisfy 0 < test < 1 and 0 < validation < 1")
+    test_start = int(query_count * (1 - test_ratio))
+    before = sorted(index for index in positives if index < test_start)
+    test = sorted(index for index in positives if index >= test_start)
+    if not before or not test:
+        raise RuntimeError("the block split needs annotated queries before and after the test start")
+    width = max(1, int(len(before) * validation_ratio / len(validation_centres)))
+    blocks: list[list[int]] = []
+    for centre in validation_centres:
+        start = min(max(0, int(len(before) * float(centre)) - width // 2), len(before) - width)
+        block = before[start:start + width]
+        if blocks and block[0] <= blocks[-1][-1]:
+            raise ValueError("validation blocks overlap; use fewer blocks or a smaller validation_ratio")
+        blocks.append(block)
+
+    frames = {int(k): {int(v) for v in values} for k, values in positives.items()}
+    test_frames = set().union(*(frames[i] for i in test))
+    candidates = [index for block in blocks for index in block]
+    validation = [i for i in candidates if not frames[i] & test_frames]
+    dropped_validation = [i for i in candidates if frames[i] & test_frames]
+    held_frames = test_frames.union(*(frames[i] for i in validation)) if validation else test_frames
+    in_validation = set(candidates)
+    train, dropped_train = [], []
+    for index in before:
+        if index in in_validation:
+            continue
+        (dropped_train if frames[index] & held_frames else train).append(index)
+    if not train or not validation:
+        raise RuntimeError("the block split left no training or no validation query")
+    return {
+        "positives": {int(k): list(v) for k, v in positives.items()},
+        "train_query_indices": train,
+        "validation_query_indices": validation,
+        "test_query_indices": test,
+        "test_start": test_start,
+        "validation_blocks": [[block[0], block[-1]] for block in blocks],
+        "validation_centres": [float(c) for c in validation_centres],
+        "excluded_train_indices": dropped_train,
+        "excluded_validation_indices": dropped_validation,
+        "excluded_test_indices": [],
+        "split_guard": "ground_truth_blocks",
+    }
+
+
 def build_split(
     data_root: str | Path,
     mapping: Mapping[str, Any],

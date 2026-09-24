@@ -120,6 +120,64 @@ def pose_positions(
     return {record.index: poses[record.stem][1] for record in records}
 
 
+def build_cross_validation_split(
+    query_positions: Mapping[int, Any],
+    positives: Mapping[int, list[int]],
+    *,
+    folds: int,
+    test_fold: int,
+) -> dict[str, Any]:
+    """One fold of a K-fold split over the query walk, in walking order.
+
+    Fold ``test_fold`` is the test set, the next one round is validation and
+    the rest are training. Bounds are cut over all queries, not only the
+    annotated ones, so the folds stay the same stretches of street whatever
+    the ground-truth radius; queries with no positive then drop out of every
+    part, because a query with no right answer trains nothing and scores
+    nothing.
+    """
+
+    if folds < 3:
+        raise ValueError(f"need at least three folds, got {folds}")
+    if not 0 <= test_fold < folds:
+        raise ValueError(f"test_fold must be in [0, {folds}), got {test_fold}")
+
+    ordered = sorted(int(index) for index in query_positions)
+    total = len(ordered)
+    edges = [round(total * i / folds) for i in range(folds + 1)]
+    members = [ordered[edges[i]:edges[i + 1]] for i in range(folds)]
+    annotated = {int(k) for k, v in positives.items() if v}
+
+    validation_fold = (test_fold + 1) % folds
+    train_folds = [i for i in range(folds) if i not in (test_fold, validation_fold)]
+
+    def keep(fold_ids: list[int]) -> list[int]:
+        return sorted(i for fold in fold_ids for i in members[fold] if i in annotated)
+
+    train = keep(train_folds)
+    validation = keep([validation_fold])
+    test = keep([test_fold])
+    if not train or not test:
+        raise RuntimeError(
+            f"fold {test_fold} of {folds} left an empty annotated train or test set"
+        )
+    return {
+        "positives": {int(k): [int(v) for v in values] for k, values in positives.items()},
+        "train_query_indices": train,
+        "validation_query_indices": validation,
+        "test_query_indices": test,
+        "protocol": "cross_validation",
+        "split_fold": int(test_fold),
+        "split_fold_count": int(folds),
+        "fold_bounds": [[edges[i], edges[i + 1]] for i in range(folds)],
+        "fold_assignment": {
+            "train": train_folds,
+            "validation": [validation_fold],
+            "test": [test_fold],
+        },
+    }
+
+
 def build_evaluation_split(
     query_positions: Mapping[int, Any], positives: Mapping[int, list[int]]
 ) -> dict[str, Any]:
