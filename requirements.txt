@@ -1,0 +1,11 @@
+# Training and evaluation on released annotations (train.py, eval.py).
+# CUDA 12.8 wheels of torch:
+#   pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0
+torch-geometric==2.7.0
+faiss-cpu==1.13.2
+numpy==2.3.5
+pillow==12.0.0
+pyyaml==6.0.3
+transformers>=5.15,<6

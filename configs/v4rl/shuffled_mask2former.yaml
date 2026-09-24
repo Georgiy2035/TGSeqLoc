@@ -1,0 +1,15 @@
+# Table IV (Shuffled strings)
+# Expected test result: R@1 64.13, R@5 76.19, R@10 81.62 (1012 queries)
+# Weights: shuffled_mask2former.pth
+dataset:
+  adapter: v4rl
+  text_root_template: v4rl/text/qwen3_vl_4b-yolo11x_seg/{sequence}
+  scene_graph_root_template: v4rl/graphs/mask2former/{sequence}
+  gt_path: v4rl/gt_shop_street_1.txt
+  split_guard: ground_truth_blocks
+  validation_centres: [0.3, 0.6]
+  interpolate_gt: true
+preprocess: {shuffle_text_seed: 42}
+model: {text_fusion: additive}
+training: {positive_interval_fraction: 0.5}
+retrieval: {top_k: 100}

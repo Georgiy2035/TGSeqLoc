@@ -1,0 +1,14 @@
+# Table IV (Additive fusion, anchor) and Table II (Mask2Former)
+# Expected test result: R@1 89.33, R@5 92.39, R@10 92.98 (1012 queries)
+# Weights: additive_mask2former.pth
+dataset:
+  adapter: v4rl
+  text_root_template: v4rl/text/qwen3_vl_4b-yolo11x_seg/{sequence}
+  scene_graph_root_template: v4rl/graphs/mask2former/{sequence}
+  gt_path: v4rl/gt_shop_street_1.txt
+  split_guard: ground_truth_blocks
+  validation_centres: [0.3, 0.6]
+  interpolate_gt: true
+model: {text_fusion: additive}
+training: {positive_interval_fraction: 0.5}
+retrieval: {top_k: 100}

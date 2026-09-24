@@ -1,0 +1,18 @@
+# Sec. IV-E.2 (multilingual-e5-small)
+# Expected test result: R@1 86.07, R@5 92.49, R@10 93.97 (1012 queries)
+# Weights: encoder_multilingual_e5_small.pth
+dataset:
+  adapter: v4rl
+  text_root_template: v4rl/text/qwen3_vl_4b-yolo11x_seg/{sequence}
+  scene_graph_root_template: v4rl/graphs/mask2former/{sequence}
+  gt_path: v4rl/gt_shop_street_1.txt
+  split_guard: ground_truth_blocks
+  validation_centres: [0.3, 0.6]
+  interpolate_gt: true
+preprocess:
+  text_encoder:
+    backend: multilingual_e5
+    params: {model_name: intfloat/multilingual-e5-small, prefix: 'passage: ', pooling: mean}
+model: {text_emb_dim: 384, text_fusion: additive}
+training: {positive_interval_fraction: 0.5}
+retrieval: {top_k: 100}

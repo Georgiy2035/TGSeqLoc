@@ -1,0 +1,50 @@
+[project]
+name = "tgseqloc"
+version = "1.0.0"
+description = "TGSeqLoc: text-aware scene-graph place recognition"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "faiss-cpu==1.13.2",
+    "numpy==2.3.5",
+    "pillow==12.0.0",
+    "pyyaml==6.0.3",
+    "torch==2.11.0",
+    "torch-geometric==2.7.0",
+    "transformers>=5.15,<6",
+]
+
+[project.optional-dependencies]
+# Segmentation for annotate_text.py and detector-based graphs for
+# annotate_graphs.py; training and evaluation on released annotations do not
+# need it. Text recognizers are installed separately (requirements_annotation.txt).
+annotation = [
+    "ultralytics>=8.4,<8.5",
+    "pycocotools>=2.0.11",
+    "scipy>=1.17",
+    "torchvision==0.26.0",
+]
+
+[tool.uv.sources]
+# The default PyPI torch wheels lack kernels for recent GPUs (sm_120); the
+# cu128 index provides them.
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

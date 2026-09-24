@@ -1,0 +1,16 @@
+# Annotation from images (annotate_text.py, annotate_graphs.py). Use a separate
+# environment: vLLM pins its own torch build. Then: pip install --no-deps -e .
+#
+# Text recognition, --ocr qwen3_vl_4b (versions used for the released annotations)
+vllm==0.27.1
+transformers>=5.15,<6
+pillow
+# Dynamic-object segmentation (--segmenter yolo11x_seg | yolo11m_seg | yoloe_11l_seg)
+# and graph generators (--generator grounding_dino | mask2former)
+ultralytics>=8.4,<8.5
+pycocotools>=2.0.11
+scipy>=1.17
+#
+# Text recognition, --ocr paddleocr_v5: install into its own environment
+#   pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+#   pip install paddleocr==3.7.0

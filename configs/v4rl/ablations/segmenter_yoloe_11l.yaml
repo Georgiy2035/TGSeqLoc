@@ -1,0 +1,14 @@
+# Sec. IV-E.1 (YOLOE-11L-seg as segmenter)
+# Expected test result: R@1 86.76, R@5 91.90, R@10 93.18 (1012 queries)
+# Weights: segmenter_yoloe_11l.pth
+dataset:
+  adapter: v4rl
+  text_root_template: v4rl/text/qwen3_vl_4b-yoloe_11l_seg/{sequence}
+  scene_graph_root_template: v4rl/graphs/mask2former/{sequence}
+  gt_path: v4rl/gt_shop_street_1.txt
+  split_guard: ground_truth_blocks
+  validation_centres: [0.3, 0.6]
+  interpolate_gt: true
+model: {text_fusion: additive}
+training: {positive_interval_fraction: 0.5}
+retrieval: {top_k: 100}

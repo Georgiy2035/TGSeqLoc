@@ -1,0 +1,13 @@
+# final configuration: set fusion with Grounding DINO graphs (Sec. IV-B.3)
+# Expected test result: R@1 97.04, R@5 98.91, R@10 98.91 (1012 queries)
+# Weights: set_grounding_dino.pth
+dataset:
+  adapter: v4rl
+  text_root_template: v4rl/text/qwen3_vl_4b-yolo11x_seg/{sequence}
+  scene_graph_root_template: v4rl/graphs/grounding_dino/{sequence}
+  gt_path: v4rl/gt_shop_street_1.txt
+  split_guard: ground_truth_blocks
+  validation_centres: [0.3, 0.6]
+  interpolate_gt: true
+training: {positive_interval_fraction: 0.5}
+retrieval: {top_k: 100}

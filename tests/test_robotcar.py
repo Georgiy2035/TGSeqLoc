@@ -1,0 +1,239 @@
+"""Metric ground truth and the geographic split of RobotCar."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from tgseqloc.data.robotcar import (
+    Track,
+    build_geographic_split,
+    build_radius_positives,
+    load_ins_track,
+)
+
+
+class TrackTests(unittest.TestCase):
+    def track(self) -> Track:
+        return Track((100, 200, 300), ((0.0, 0.0), (10.0, 0.0), (10.0, 10.0)))
+
+    def test_position_is_interpolated_between_samples(self) -> None:
+        self.assertEqual(self.track().position_at(150), (5.0, 0.0))
+
+    def test_exact_sample_is_returned(self) -> None:
+        self.assertEqual(self.track().position_at(200), (10.0, 0.0))
+
+    def test_frame_outside_the_log_has_no_position(self) -> None:
+        """Extrapolation here would invent ground truth."""
+
+        self.assertIsNone(self.track().position_at(50))
+        self.assertIsNone(self.track().position_at(400))
+
+    def test_unsorted_rows_are_ordered_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ins.csv"
+            path.write_text(
+                "timestamp,northing,easting\n300,10,10\n100,0,0\n200,10,0\n",
+                encoding="utf-8",
+            )
+            track = load_ins_track(path)
+            self.assertEqual(track.timestamps, (100, 200, 300))
+            self.assertEqual(track.position_at(150), (5.0, 0.0))
+
+
+class PositivesTests(unittest.TestCase):
+    def test_every_database_frame_within_the_radius_is_a_positive(self) -> None:
+        database = {0: (0.0, 0.0), 1: (10.0, 0.0), 2: (100.0, 0.0)}
+        positives = build_radius_positives({7: (5.0, 0.0)}, database, radius=25.0)
+        self.assertEqual(positives[7], [0, 1])
+
+    def test_a_query_with_nothing_near_is_absent(self) -> None:
+        """Having no positives is a statement about coverage, not about the file."""
+
+        positives = build_radius_positives({1: (0.0, 0.0)}, {0: (500.0, 0.0)}, 25.0)
+        self.assertEqual(positives, {})
+
+    def test_radius_must_be_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            build_radius_positives({}, {}, radius=0.0)
+
+
+class SplitTests(unittest.TestCase):
+    def positions(self) -> dict[int, tuple[float, float]]:
+        # A straight 900 m drive, then a return to the start.
+        forward = {i: (float(i * 100), 0.0) for i in range(10)}
+        forward[9] = (0.0, 0.0)
+        return forward
+
+    def test_test_segment_comes_from_the_end_of_the_route(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.0, radius=25.0)
+        self.assertEqual(split["test_query_indices"], [8, 9])
+        self.assertEqual(split["excluded_test_indices"], [])
+
+    def test_a_revisit_is_dropped_from_the_test_set(self) -> None:
+        """The route revisits covered ground; otherwise training would answer the test."""
+
+        positions = self.positions()
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.0, radius=25.0)
+        self.assertEqual(split["excluded_test_indices"], [9])
+        self.assertEqual(split["test_query_indices"], [8])
+
+    def test_validation_is_its_own_segment_between_training_and_test(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(20)}
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.2, radius=25.0)
+        train, validation, test = (split[f"{part}_query_indices"]
+                                   for part in ("train", "validation", "test"))
+        self.assertEqual(train, list(range(12)))
+        self.assertEqual(validation, [12, 13, 14, 15])
+        self.assertEqual(test, [16, 17, 18, 19])
+        self.assertTrue(set(train).isdisjoint(validation))
+        self.assertTrue(set(validation).isdisjoint(test))
+
+    def test_a_revisit_is_dropped_from_validation_too(self) -> None:
+        """Validation selects the epoch, so it is separated by the same rule as the test."""
+
+        positions = {i: (float(i * 100), 0.0) for i in range(20)}
+        positions[13] = (500.0, 0.0)   # back on training ground
+        positions[17] = (1400.0, 0.0)  # back on validation ground
+        positives = {i: [0] for i in positions}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.2, radius=25.0)
+        self.assertEqual(split["excluded_validation_indices"], [13])
+        self.assertEqual(split["excluded_test_indices"], [17])
+        self.assertNotIn(13, split["validation_query_indices"])
+        self.assertNotIn(17, split["test_query_indices"])
+
+    def test_ratios_must_leave_room_for_training(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        with self.assertRaises(ValueError):
+            build_geographic_split(positions, {i: [0] for i in positions},
+                                   test_ratio=0.6, validation_ratio=0.4, radius=25.0)
+
+    def test_queries_without_positives_are_not_scored(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        positives = {i: [0] for i in positions if i % 2 == 0}
+        split = build_geographic_split(positions, positives, test_ratio=0.2,
+                                       validation_ratio=0.0, radius=25.0)
+        self.assertEqual(split["test_query_indices"], [8])
+
+    def test_radius_is_recorded_in_the_split(self) -> None:
+        positions = {i: (float(i * 100), 0.0) for i in range(10)}
+        split = build_geographic_split(positions, {i: [0] for i in positions},
+                                       test_ratio=0.2, validation_ratio=0.0, radius=30.0)
+        self.assertEqual(split["split_radius_m"], 30.0)
+
+
+class FrameListTests(unittest.TestCase):
+    """The frames of an experiment come from a recorded list, not from a directory stride."""
+
+    def test_comments_blank_lines_and_role_prefixes(self) -> None:
+        from tgseqloc.data.robotcar import load_frame_list
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "frames.txt"
+            path.write_text("# subset\n\n1439388259735205\nquery/1441186652690741\n",
+                            encoding="utf-8")
+            self.assertEqual(load_frame_list(path),
+                             frozenset({"1439388259735205", "1441186652690741"}))
+
+    def test_an_empty_list_is_an_error(self) -> None:
+        """An empty list is a configuration error, not a request for zero frames."""
+
+        from tgseqloc.data.robotcar import load_frame_list
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "frames.txt"
+            path.write_text("# empty\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_frame_list(path)
+
+    def test_discovery_keeps_only_listed_frames_with_contiguous_indices(self) -> None:
+        """Indices are contiguous: positive pairs are addressed by them."""
+
+        from tgseqloc.data.robotcar import discover_robotcar_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "graphs" / "base").mkdir(parents=True)
+            (root / "text" / "t1").mkdir(parents=True)
+            for stem in ("100", "200", "300"):
+                (root / "text" / "t1" / f"{stem}.json").write_text("{}", encoding="utf-8")
+                (root / "graphs" / "base" / f"{stem}.json").write_text("{}", encoding="utf-8")
+            text, graphs = str(root / "text" / "{traversal}"), str(root / "graphs" / "{sequence}")
+            everything = discover_robotcar_records(text, graphs, {"base": "t1"})
+            listed = discover_robotcar_records(text, graphs, {"base": "t1"}, frame_list={"100", "300"})
+            self.assertEqual([r.stem for r in everything], ["100", "200", "300"])
+            self.assertEqual([r.stem for r in listed], ["100", "300"])
+            self.assertEqual([r.index for r in listed], [0, 1])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class FoldSplitTests(unittest.TestCase):
+    """A split read from existing annotation must be the same for every branch."""
+
+    ASSIGNMENT = {
+        "folds": 2, "block_length_m": 200.0, "radius_m": 25.0,
+        "density_reference": "rcgf_real_qwen",
+        "assignment": {
+            "0": {"train": ["a", "b"], "validation": ["c"], "test": ["d", "e"]},
+            "1": {"train": ["d", "e"], "validation": ["a"], "test": ["b", "c"]},
+        },
+    }
+    INDEX = {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4}
+
+    def test_parts_come_from_the_written_assignment(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        split = load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {i: [0] for i in range(5)})
+        self.assertEqual(split["train_query_indices"], [0, 1])
+        self.assertEqual(split["validation_query_indices"], [2])
+        self.assertEqual(split["test_query_indices"], [3, 4])
+        self.assertEqual(split["split_fold"], 0)
+        self.assertEqual(split["split_radius_m"], 25.0)
+        self.assertEqual(split["split_density_reference"], "rcgf_real_qwen")
+
+    def test_each_fold_tests_its_own_blocks(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        first = load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {i: [0] for i in range(5)})
+        second = load_fold_split(self.ASSIGNMENT, 1, self.INDEX, {i: [0] for i in range(5)})
+        self.assertTrue(set(first["test_query_indices"]).isdisjoint(second["test_query_indices"]))
+
+    def test_a_frame_outside_this_run_is_counted_not_silently_kept(self) -> None:
+        """The run's frame list may be narrower than the annotation; frames must not be lost silently."""
+
+        from tgseqloc.data.robotcar import load_fold_split
+
+        index = {"a": 0, "b": 1, "c": 2, "d": 3}
+        split = load_fold_split(self.ASSIGNMENT, 0, index, {i: [0] for i in range(4)})
+        self.assertEqual(split["test_query_indices"], [3])
+        self.assertEqual(split["frames_not_in_this_run"], 1)
+
+    def test_queries_without_positives_are_not_scored(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        split = load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {0: [0], 1: [0], 2: [0], 3: [0]})
+        self.assertEqual(split["test_query_indices"], [3])
+
+    def test_an_unknown_fold_is_an_error(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        with self.assertRaises(ValueError):
+            load_fold_split(self.ASSIGNMENT, 7, self.INDEX, {i: [0] for i in range(5)})
+
+    def test_an_empty_test_set_is_an_error(self) -> None:
+        from tgseqloc.data.robotcar import load_fold_split
+
+        with self.assertRaises(RuntimeError):
+            load_fold_split(self.ASSIGNMENT, 0, self.INDEX, {0: [0], 1: [0], 2: [0]})

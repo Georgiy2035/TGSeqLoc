@@ -1,0 +1,18 @@
+# Sec. IV-E.2 (character n-grams, 384 buckets)
+# Expected test result: R@1 86.86, R@5 91.40, R@10 92.79 (1012 queries)
+# Weights: encoder_char_ngram_384.pth
+dataset:
+  adapter: v4rl
+  text_root_template: v4rl/text/qwen3_vl_4b-yolo11x_seg/{sequence}
+  scene_graph_root_template: v4rl/graphs/mask2former/{sequence}
+  gt_path: v4rl/gt_shop_street_1.txt
+  split_guard: ground_truth_blocks
+  validation_centres: [0.3, 0.6]
+  interpolate_gt: true
+preprocess:
+  text_encoder:
+    backend: char_ngram
+    params: {embedding_dim: 384}
+model: {text_emb_dim: 384, text_fusion: additive}
+training: {positive_interval_fraction: 0.5}
+retrieval: {top_k: 100}
