@@ -164,17 +164,16 @@ vLLM batches requests, so a rerun can return a few box coordinates that differ b
 ### Scene graphs
 
 ```bash
-python annotate_graphs.py --images_folder datasets/v4rl/seq1_frames \
+python annotate_graphs.py --images_folder datasets/v4rl/seq1_frames --resize 640 480 \
     --output_folder annotations/v4rl/graphs/grounding_dino/seq1 --generator grounding_dino
 ```
 
-* `--generator grounding_dino` queries Grounding DINO (base) with twenty static street classes, so no dynamic object enters the graph.
-* `--generator mask2former` uses Mask2Former Swin-L (COCO panoptic) instance segments and drops dynamic COCO classes at the detector output (`--keep_dynamic` keeps them).
+* `--generator grounding_dino` queries Grounding DINO (base) with twenty static street classes, so no dynamic object enters the graph. Labels are kept as returned; a box matched by two query phrases carries both (e.g. `window shop window`).
+* `--generator mask2former` uses Mask2Former Swin-L (COCO panoptic) instance segments, drops boxes under 0.1% of the frame, and drops dynamic COCO classes at the detector output, before edges are built (`--keep_dynamic` keeps them).
 * Relations come from normalized box geometry: every object is linked to its nearest objects by box centre (`--neighbours`, 1 in the released annotations) with the predicates `in`, `standing on`, `beside`, `above` and `next to` (see `src/tgseqloc/annotation/graphs.py` for the thresholds).
+* `--resize 640 480` resizes each frame (bilinear) and passes it through JPEG quality 92, the preprocessing of the released V4RL graphs. With it, the command reproduces the released Mask2Former and Grounding DINO graphs of V4RL byte for byte.
 
 Graphs of the vision-language and scene-graph models of Table II (Gemini 3.1 Flash Lite, RelTR, SceneGraphVLM) are released as annotations only.
-
-<!-- TODO: V4RL Mask2Former / Grounding DINO generator settings (awaiting the original generation script). -->
 
 ### Acceptance checks
 

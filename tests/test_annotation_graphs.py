@@ -12,7 +12,6 @@ from tgseqloc.annotation.graphs import (
     MASK2FORMER_DYNAMIC_CLASSES,
     STREET_VOCABULARY,
     build_graph,
-    canonical_label,
     relation_label,
 )
 from tgseqloc.annotation.segmentation import DYNAMIC_CLASSES
@@ -30,6 +29,13 @@ class RelationTests(unittest.TestCase):
         for label, (source, target) in cases.items():
             with self.subTest(label=label):
                 self.assertEqual(relation_label(source, target), label)
+
+    def test_thresholds_are_strict(self) -> None:
+        # Exactly 80 % of the source inside the target is not yet "in".
+        self.assertEqual(relation_label((0.0, 0.0, 1.0, 0.5), (0.0, 0.0, 0.8, 0.5)), "beside")
+        # "standing on" needs the bottom of the source within 0.05 of the target's top.
+        self.assertEqual(relation_label((0.0, 0.5, 0.2, 0.6), (0.1, 0.56, 0.3, 0.9)), "standing on")
+        self.assertEqual(relation_label((0.0, 0.5, 0.2, 0.6), (0.1, 0.66, 0.3, 0.9)), "above")
 
 
 class BuildGraphTests(unittest.TestCase):
@@ -52,11 +58,6 @@ class BuildGraphTests(unittest.TestCase):
         self.assertEqual(build_graph(self.OBJECTS, {}, neighbours=0)["links"], [])
         self.assertEqual(build_graph(self.OBJECTS[:1], {})["links"], [])
 
-    def test_raw_label_is_kept_only_when_it_differs(self) -> None:
-        graph = build_graph(self.OBJECTS[:2], {}, raw_labels=["building", "sign board"])
-        self.assertNotIn("class_name_raw", graph["nodes"][0]["data"])
-        self.assertEqual(graph["nodes"][1]["data"]["class_name_raw"], "sign board")
-
 
 class VocabularyTests(unittest.TestCase):
     def test_grounding_dino_is_queried_with_twenty_static_classes(self) -> None:
@@ -65,16 +66,6 @@ class VocabularyTests(unittest.TestCase):
 
     def test_mask2former_drops_every_class_the_text_filter_treats_as_dynamic(self) -> None:
         self.assertLessEqual(set(DYNAMIC_CLASSES), MASK2FORMER_DYNAMIC_CLASSES)
-
-    def test_phrases_map_to_the_earliest_vocabulary_class(self) -> None:
-        self.assertEqual(canonical_label("shop window"), "shop window")
-        self.assertEqual(canonical_label("traffic light pole"), "traffic light")
-        self.assertEqual(canonical_label(" window door "), "window")
-
-    def test_truncated_phrase_is_completed_only_when_unambiguous(self) -> None:
-        self.assertEqual(canonical_label("traff"), "traffic light")
-        self.assertEqual(canonical_label("tr"), "tr")
-        self.assertEqual(canonical_label("car"), "car")
 
 
 class CheckTests(unittest.TestCase):
