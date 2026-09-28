@@ -17,7 +17,8 @@ annotate_text.py        # text annotation of a folder of frames (filtered or unf
 annotate_graphs.py      # scene-graph annotation of a folder of frames
 check_annotations.py    # acceptance checks of an annotated corpus
 train.py                # train on annotations, keep the best validation epoch, test it
-eval.py                 # Recall@1/5/10 of a trained model on annotations
+eval.py                 # Recall@1/5/10 of a trained model on annotations, optionally reranked
+extract_image_descriptors.py  # EDTformer descriptors of a folder of frames, for reranking
 configs/                # one YAML file per experiment of the paper
 src/tgseqloc/           # the package (annotation, data, preparation, models, training, evaluation)
 tests/
@@ -94,7 +95,21 @@ python eval.py --config configs/v4rl/set_mask2former.yaml --resume weights/v4rl/
 
 The annotations are prepared into graphs with the node-class and relation vocabularies stored in the checkpoint, every query is searched against the whole database by exact cosine similarity, and a query counts as located when a retrieved database frame falls inside its annotated correspondence interval. Each configuration file states the Recall@1/5/10 it is expected to reproduce.
 
-<!-- TODO: reranking with EDTformer descriptors (K = 1000) and sequence fusion (Sec. III-E); TGSeqLoc-Street evaluation of the RobotCar model (Table VI). -->
+### Reranking and sequence fusion
+
+The two-stage retrieval of Sec. III-E reorders the `K` nearest candidates of the text-graph descriptor by EDTformer descriptors, which are computed once per frame with the published EDTformer model:
+
+```bash
+python extract_image_descriptors.py --images_folder datasets/v4rl/seq1_frames --output image_descriptors/v4rl/seq1.npz
+python extract_image_descriptors.py --images_folder datasets/v4rl/seq2_frames --output image_descriptors/v4rl/seq2.npz
+python eval.py --config configs/v4rl/set_mask2former.yaml --resume weights/v4rl/set_mask2former.pth \
+    --datasets_folder datasets --annotations_folder annotations \
+    --image_descriptors_folder image_descriptors/v4rl --rerank_num 1000 --sequence_frames 1
+```
+
+`--rerank_num` is `K` (1000 in the paper). `--sequence_frames N` pools the candidates of the current and the `N - 1` preceding query frames before reranking them by the current frame's image descriptor (sequence pool fusion, Eq. 7); `1` is plain reranking. The image descriptor is compared only with the pooled candidates, never with the whole database.
+
+<!-- TODO: expected reranked Recall@K (Table V); TGSeqLoc-Street evaluation of the RobotCar model (Table VI). -->
 
 ## Train
 

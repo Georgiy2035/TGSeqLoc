@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 
-from tgseqloc.evaluation import evaluate_retrieval
+from tgseqloc.evaluation import RecallAtK, evaluate_retrieval
 from tgseqloc.models import EdgeAttrNormalizer, GATGraphEncoder
 
 from .trainer import (
@@ -81,8 +81,19 @@ def evaluate_transfer(
     run_dir: Path,
     retriever_factory=None,
     metric_factory=None,
+    image_descriptors: tuple[Any, Any] | None = None,
+    rerank_candidates: int = 1000,
+    sequence_frames: int = 1,
 ) -> dict[str, Any]:
-    """Recall of a checkpoint on the test queries of other prepared data."""
+    """Recall of a checkpoint on the test queries of other prepared data.
+
+    With ``image_descriptors`` -- ``(database, query)`` matrices aligned with
+    the split's database and query paths -- the ``rerank_candidates`` nearest
+    frames of every test query are also reordered by image-descriptor
+    similarity, over a pool of the last ``sequence_frames`` test queries
+    (Sec. III-E), and the recalls of that ranking are reported under
+    ``"reranked"``.
+    """
 
     payload = _torch_load(checkpoint)
     missing = sorted(
@@ -138,9 +149,28 @@ def evaluate_transfer(
         {int(k): v for k, v in split.get("positives", {}).items()},
         test,
         recalls,
-        search_k=max(top_k, max(recalls)),
+        search_k=max(top_k, max(recalls), rerank_candidates if image_descriptors is not None else 0),
         **kwargs,
     )
+    reranked = None
+    if image_descriptors is not None:
+        from tgseqloc.evaluation.reranking import rerank_sequence
+
+        database_images, query_images = image_descriptors
+        ordered = rerank_sequence(
+            nearest[:, :rerank_candidates],
+            query_images[test],
+            database_images,
+            frames=sequence_frames,
+            depth=max(top_k, max(recalls)),
+        )
+        metric = (metric_factory or RecallAtK)(recalls)
+        reranked = {
+            **metric(ordered, {int(k): v for k, v in split.get("positives", {}).items()}, test),
+            "candidates": int(rerank_candidates),
+            "sequence_frames": int(sequence_frames),
+        }
+    nearest = nearest[:, : max(top_k, max(recalls))]
     result = {
         **metrics,
         "num_database_frames": len(database),
@@ -152,6 +182,8 @@ def evaluate_transfer(
         "source_epoch": payload.get("epoch"),
         "manifest_fingerprint": manifest_fingerprint(manifest),
     }
+    if reranked is not None:
+        result["reranked"] = reranked
     run_dir.mkdir(parents=True, exist_ok=True)
     for name, value in (
         ("final_metrics.json", result),
