@@ -2,15 +2,58 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 
 @runtime_checkable
 class Source(Protocol):
-    """Loads raw records from one input modality."""
+    """Parses one precomputed sidecar into a canonical per-frame structure.
 
-    def load(self, split: str) -> Iterable[Mapping[str, Any]]: ...
+    A source reads what another tool already produced; a model that runs
+    inference itself is an :class:`OCRModel` or :class:`Segmenter` instead.
+    """
+
+    def __call__(self, path: Any, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class OCRModel(Protocol):
+    """Recognizes text on frames, returning the canonical frame format.
+
+    ``load`` is separate from construction so that configuration can be
+    validated, and missing weights reported, before anything reaches the GPU.
+    """
+
+    def load(self) -> None: ...
+
+    def predict(self, image_paths: Sequence[Any]) -> Sequence[Any]: ...
+
+    @property
+    def cache_identity(self) -> Mapping[str, Any]: ...
+
+
+@runtime_checkable
+class Segmenter(Protocol):
+    """Marks pixels belonging to ephemeral objects."""
+
+    def load(self) -> None: ...
+
+    def predict(self, image_paths: Sequence[Any]) -> Sequence[Any]: ...
+
+    @property
+    def cache_identity(self) -> Mapping[str, Any]: ...
+
+
+@runtime_checkable
+class TextDynamics(Protocol):
+    """Scores how much of each detection sits on a dynamic object.
+
+    The score stays continuous; turning it into a keep/drop decision is the
+    caller's business, so the threshold remains a configuration choice.
+    """
+
+    def score(self, frame_text: Any, frame_masks: Any) -> Sequence[float]: ...
 
 
 @runtime_checkable
@@ -18,6 +61,18 @@ class Filter(Protocol):
     """Accepts or rejects a sample."""
 
     def __call__(self, sample: Mapping[str, Any]) -> bool: ...
+
+
+@runtime_checkable
+class TextCorrection(Protocol):
+    """Repairs recognized strings before they reach an encoder.
+
+    Sits between recognition and encoding because it belongs to neither: the
+    recognizer has already committed to its output, and every encoder should be
+    able to consume the repaired text.
+    """
+
+    def correct_all(self, texts: Sequence[str]) -> Sequence[str]: ...
 
 
 @runtime_checkable
@@ -96,6 +151,10 @@ class Registry:
     KINDS = frozenset(
         {
             "source",
+            "ocr",
+            "segmenter",
+            "text_dynamics",
+            "text_correction",
             "filter",
             "encoder",
             "fusion",

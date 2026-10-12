@@ -9,22 +9,14 @@ from typing import Any, Mapping
 import torch
 from torch_geometric.data import Data
 
+from .formats import FrameRecord
+
 SCHEMA_VERSION = 3
 NODE_FEATURE_DIM = 4
 EDGE_FEATURE_DIM = 10
 
 
-@dataclass(frozen=True, slots=True)
-class FrameRecord:
-    """Paths and time identity for one source frame."""
 
-    sequence: str
-    index: int
-    timestamp: int
-    stem: str
-    image_path: Path
-    ocr_path: Path
-    graph_path: Path
 
 
 def _tensor(value: Any, dtype: torch.dtype) -> torch.Tensor:

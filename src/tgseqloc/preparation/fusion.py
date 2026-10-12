@@ -110,8 +110,19 @@ def build_fused_graph(
     connection_strategy: str = "overlap_nearest",
     connection_k: int = 1,
     metadata: Mapping[str, Any] | None = None,
+    symmetric_scene_edges: bool = False,
 ) -> Data:
-    """Fuse text nodes and bidirectional text-object edges into a PyG graph."""
+    """Fuse text nodes and text-object edges into a PyG graph.
+
+    ``symmetric_scene_edges`` adds the reverse of every scene relation. Message
+    passing follows edge direction, so with one direction only a node never
+    sees the relations it is the subject of: given ``car on ground``, the
+    ground learns a car is on it and the car learns nothing. The relation's
+    meaning is untouched either way -- its label and both endpoint classes are
+    stored per edge -- and the reverse edge recomputes its own geometry, so
+    only who receives the message changes. Text-object edges have always been
+    added both ways; this makes scene edges optional-consistent with them.
+    """
 
     if len(text_boxes) != len(texts):
         raise ValueError("text_boxes and texts must have the same length")
@@ -142,7 +153,13 @@ def build_fused_graph(
 
     unknown_edge = int(edge_label_to_idx.get("unknown", 0))
     for source, target, label in scene_edges:
-        append_edge(source, target, int(edge_label_to_idx.get(label, unknown_edge)), False)
+        index = int(edge_label_to_idx.get(label, unknown_edge))
+        append_edge(source, target, index, False)
+        if symmetric_scene_edges:
+            # The label stays: there are no inverse predicates in the
+            # vocabulary, and inventing them would put strings in the graph
+            # that the generator never produced.
+            append_edge(target, source, index, False)
     for offset, text_node in enumerate(text_nodes):
         text_index = object_count + offset
         for object_index in select_text_connections(

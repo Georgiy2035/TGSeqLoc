@@ -15,11 +15,6 @@ class ConfigError(ValueError):
     """Raised when configuration is unknown, ill-typed, or inconsistent."""
 
 
-DATASET_ADAPTERS = ("v4rl",)
-OCR_SOURCES = ("precomputed_paddleocr",)
-SCENE_GRAPH_SOURCES = ("external_json",)
-TEXT_FILTERS = ("confidence",)
-FUSION_METHODS = ("text_nodes",)
 CONNECTION_STRATEGIES = (
     "overlap_nearest",
     "overlap",
@@ -27,9 +22,24 @@ CONNECTION_STRATEGIES = (
     "fully_connected",
 )
 CACHE_POLICIES = ("reuse_if_compatible", "require_existing", "rebuild")
-GRAPH_ENCODERS = ("gat",)
-RETRIEVERS = ("faiss_cosine",)
-RERANKERS: tuple[str, ...] = ()
+
+# Duplicated from tgseqloc.preparation.text rather than imported: that module
+# pulls in torch, and configuration must stay cheap to import.
+DEFAULT_TEXT_ENCODER = "intfloat/multilingual-e5-small"
+
+
+def _registered(kind: str) -> tuple[str, ...]:
+    """Return the implementations registered for ``kind``.
+
+    Allowed values come from the registry rather than a hand-maintained tuple,
+    so registering a component is the only step needed to make it selectable.
+    The import is local because the registry pulls in torch, and configuration
+    has to stay cheap to import.
+    """
+
+    from tgseqloc.components import register_builtin_components
+
+    return register_builtin_components().available(kind)
 
 
 @dataclass(slots=True)
@@ -40,6 +50,46 @@ class DatasetConfig:
     root: Path = Path("data/V4RL")
     sequences: list[str] = field(default_factory=lambda: ["seq1", "seq2"])
     ocr_root_template: str = "data/ocr/{sequence}/chunk_{chunk}"
+    # Which recognizer's sidecar to read. Every recognizer writes the same
+    # schema into the same per-frame directory under its own name, so an OCR
+    # ablation swaps this and reuses one set of graphs, splits and GT.
+    ocr_file_name: str = "paddleocr_v5.json"
+    # RobotCar names its recordings by date; role -> recording. Ground truth is
+    # a distance in metres against the INS log rather than a correspondence
+    # file, so the radius belongs to the dataset, not to the training protocol.
+    traversals: dict[str, str] = field(default_factory=dict)
+    ins_path_template: str = ""
+    # Pervomayskaya: each walk's poses.csv, one camera pose per image.
+    poses_path_template: str = ""
+    image_path_template: str = ""
+    # Which frames the experiment uses, one stem per line. Empty takes every
+    # frame that has both recognized text and a scene graph.
+    frame_list_path: str = ""
+    # V4RL: "ground_truth_overlap" drops validation and test queries whose
+    # ground-truth reference frames are shared with an earlier part.
+    split_guard: str = ""
+    # V4RL with split_guard "ground_truth_blocks": centres of the validation
+    # blocks as fractions of the annotated queries before the test; together
+    # the blocks take validation_ratio of those queries.
+    validation_centres: list[float] = field(default_factory=list)
+    # RobotCar: several cameras as extra frames of the same traversals, each
+    # {name: {ocr_root_template, scene_graph_root_template, image_path_template,
+    # frame_list_path}} overriding the top-level values; empty for one camera.
+    cameras: dict[str, dict[str, Any]] = field(default_factory=dict)
+    primary_camera: str = "stereo_centre"
+    # A frame of another camera joins the fold part of the primary frame
+    # nearest in time, if that frame is at most this many seconds away.
+    camera_fold_max_gap_s: float = 0.3
+    # Written block cross-validation assignment; empty means a single time cut.
+    split_folds_path: str = ""
+    split_fold: int = -1
+    # >0 включает K-кратную кросс-валидацию по треку запросов вместо
+    # разбиения из файла. Пока используется Первомайской.
+    split_fold_count: int = 0
+    # Сколько первых координат позы участвуют в метрике. 0 — все.
+    # Первомайская ставит 2: третья координата там плывёт.
+    gt_dimensions: int = 0
+    gt_radius_m: float = 25.0
     scene_graph_root_template: str = "data/scene_graphs/{sequence}"
     gt_path: Path = Path("data/V4RL/gt/gt_shop_street_1.txt")
     prepared_root: Path = Path("data/prepared")
@@ -64,18 +114,82 @@ SourcesConfig = SourceConfig
 
 
 @dataclass(slots=True)
+class ComponentConfig:
+    """One swappable stage: which implementation, its weights, its parameters.
+
+    ``params`` is deliberately untyped here. A stage's parameters belong to the
+    implementation that consumes them, so keeping them out of ``AppConfig``
+    stops the shared sections from accumulating a field per model ever added.
+    ``weights`` names an entry in the weight manifest rather than a filesystem
+    path, so a configuration stays portable between machines.
+    """
+
+    backend: str | None = None
+    weights: str | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.backend)
+
+    def validate(self, path: str, kind: str) -> None:
+        if self.backend is None:
+            if self.weights is not None:
+                raise ConfigError(f"{path}.weights is set while {path}.backend is null")
+            return
+        if not self.backend.strip():
+            raise ConfigError(f"{path}.backend cannot be empty; use null to disable")
+        _choice(f"{path}.backend", self.backend, _registered(kind))
+
+
+@dataclass(slots=True)
 class PreprocessConfig:
     """Text filtering, encoding, graph fusion, and batching settings."""
 
     text_filter: str = "confidence"
-    text_encoder_backend: str = "multilingual_e5"
-    text_encoder: str = "intfloat/multilingual-e5-small"
-    revision: str | None = None
+    text_encoder: ComponentConfig = field(
+        default_factory=lambda: ComponentConfig(
+            backend="multilingual_e5",
+            params={"model_name": DEFAULT_TEXT_ENCODER, "revision": None},
+        )
+    )
+    """Which frozen encoder turns recognized strings into node features. The
+    model id and revision live in ``params`` because they mean nothing to the
+    other backends; a lexical encoder has neither."""
+    text_correction: ComponentConfig = field(default_factory=ComponentConfig)
+    """Optional repair of recognized strings before encoding. Disabled by
+    default: a corrector pulls words toward its dictionary, and the shop names
+    that identify a place are exactly what a general dictionary lacks."""
+    shuffle_text_seed: int | None = None
+    """Control arm: permute recognized strings across the whole dataset,
+    keeping every box, node and edge in place. If a run scores the same with
+    scrambled text as with real text, the gain comes from graph structure
+    rather than from what the signs say -- which is the first thing a reader
+    will ask. ``None`` disables it."""
+    use_text_nodes: bool = True
+    """Whether text nodes are built at all. ``false`` leaves a graph of object
+    nodes only -- the "no text" arm of an ablation. The model must then be
+    configured with ``model.use_text_nodes: false`` to match."""
     fusion: str = "text_nodes"
     connection_strategy: str = "overlap_nearest"
     connection_k: int = 1
     ocr_confidence_threshold: float = 0.0
+    # Drop recognized strings shorter than this many characters; 0 keeps all.
+    text_min_length: int = 0
+    # Drop recognized strings made of digits alone.
+    text_drop_numeric: bool = False
     encoder_batch_size: int = 128
+    # Object classes to drop from the graph as ephemeral. Empty keeps every
+    # node, which is what V4RL used; RobotCar needs it because half of all
+    # graph nodes there are vehicles and people.
+    dynamic_node_classes: list[str] = field(default_factory=list)
+    # Prepared manifest whose node-class and relation vocabularies to use
+    # instead of building them from this dataset's graphs; needed to evaluate a
+    # model trained on another dataset. Empty builds them here.
+    vocabulary_manifest: str = ""
+    # Add the reverse of every scene relation. Off by default: every
+    # reported result was produced without it.
+    symmetric_scene_edges: bool = False
     frame_batch_size: int = 256
     gt_tolerance_ns: int = 50_000_000
 
@@ -108,6 +222,23 @@ class ModelConfig:
     heads: int = 4
     use_text_nodes: bool = True
     use_edge_geometry: bool = True
+    # How recognized text enters the graph. "node" wires a text node to its
+    # object; "additive" sums the text into that object's feature instead, so a
+    # frame without text is encoded exactly as without the text layer.
+    text_fusion: str = "node"
+    # Chance, during training only, of leaving out each text term (additive form).
+    text_dropout: float = 0.0
+    # "set" form only: centre string embeddings on the mean string of the
+    # training graphs before encoding them.
+    text_centering: bool = False
+    # Additive and set forms: start the last text layer at zero, so training
+    # begins from the text-free model.
+    text_zero_init: bool = False
+    # Batch normalization against descriptor collapse: "pooled" before the
+    # projection, "output" on the descriptor before L2 normalization.
+    descriptor_norm: str = "none"
+    # Bias of the last projection layer.
+    proj_bias: bool = True
 
 
 @dataclass(slots=True)
@@ -124,10 +255,29 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     margin: float = 0.3
+    # "triplet" (hinge with margin) or "infonce" (softmax over the positive and
+    # the mined negatives, with temperature).
+    loss: str = "triplet"
+    temperature: float = 0.07
     negatives_per_query: int = 2
     hard_search_depth: int = 256
+    # Keep database frames closer than this many metres out of a query's
+    # negatives; 0 leaves only the positives out, as before.
+    negative_min_distance_m: float = 0.0
+    # Train only on positives within this many metres (0: the whole ground
+    # truth). Frames between it and the ground-truth radius are left out of
+    # training; evaluation still uses the whole ground truth.
+    positive_max_distance_m: float = 0.0
+    # Interval ground truth (V4RL): train only on this central fraction of each
+    # query's interval of positives; the edges take no part in training.
+    positive_interval_fraction: float = 0.0
     max_grad_norm: float = 5.0
     miner: str = "hard_negative"
+    # Epochs at the start that use random negatives instead of ``miner``.
+    miner_warmup_epochs: int = 0
+    # Take the positive and the negatives of a triplet from the query's own
+    # camera (several RobotCar cameras); evaluation is unchanged.
+    same_camera_triplets: bool = False
     recall_values: list[int] = field(default_factory=lambda: [1, 5, 10])
     early_stopping_metric: str = "R@5"
     resume_from: Path | None = None
@@ -149,6 +299,12 @@ class RuntimeConfig:
     device: str = "auto"
     seed: int = 42
     num_workers: int = 4
+    deterministic: bool = True
+    """Force deterministic CUDA kernels. Graph aggregation uses atomic adds,
+    which reorder between runs, so without this two runs of one configuration
+    differ -- measured at 7.5 points of Recall@5, more than most effects being
+    compared. Turn it off only if an operation has no deterministic
+    implementation."""
 
 
 @dataclass(slots=True)
@@ -163,6 +319,17 @@ class AppConfig:
 
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
+    ocr: ComponentConfig = field(default_factory=ComponentConfig)
+    """Recognition run by the pipeline itself, as a cached stage. Distinct from
+    ``sources.ocr``, which reads what another tool already produced; with this
+    disabled preparation keeps using that parser."""
+    segmentation: ComponentConfig = field(default_factory=ComponentConfig)
+    """Dynamic-object segmentation. Disabled (``backend: null``) until a
+    segmenter is registered; with it disabled the dynamics stage is skipped and
+    every detection reaches the graph."""
+    text_dynamics: ComponentConfig = field(default_factory=ComponentConfig)
+    """Scores how much of each detection sits on a dynamic object. Requires
+    ``segmentation`` to be enabled."""
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -174,34 +341,46 @@ class AppConfig:
     def validate(self) -> AppConfig:
         """Validate implemented names, ranges, and cross-field constraints."""
 
-        _choice("dataset.adapter", self.dataset.adapter, DATASET_ADAPTERS)
-        _choice("sources.ocr", self.sources.ocr, OCR_SOURCES)
-        _choice(
-            "sources.scene_graph", self.sources.scene_graph, SCENE_GRAPH_SOURCES
-        )
-        _choice(
-            "preprocess.text_filter", self.preprocess.text_filter, TEXT_FILTERS
-        )
-        _choice(
-            "preprocess.text_encoder_backend",
-            self.preprocess.text_encoder_backend,
-            ("multilingual_e5",),
-        )
-        _choice("preprocess.fusion", self.preprocess.fusion, FUSION_METHODS)
+        _choice("dataset.adapter", self.dataset.adapter, _registered("dataset"))
+        _choice("sources.ocr", self.sources.ocr, _registered("source"))
+        _choice("sources.scene_graph", self.sources.scene_graph, _registered("source"))
+        _choice("preprocess.text_filter", self.preprocess.text_filter, _registered("filter"))
+        if not self.preprocess.text_encoder.enabled:
+            raise ConfigError(
+                "preprocess.text_encoder.backend is required: text nodes need features"
+            )
+        self.preprocess.text_encoder.validate("preprocess.text_encoder", "encoder")
+        _choice("preprocess.fusion", self.preprocess.fusion, _registered("fusion"))
         _choice(
             "preprocess.connection_strategy",
             self.preprocess.connection_strategy,
             CONNECTION_STRATEGIES,
         )
         _choice("cache.policy", self.cache.policy, CACHE_POLICIES)
-        _choice("model.graph_encoder", self.model.graph_encoder, GRAPH_ENCODERS)
         _choice(
-            "retrieval.retriever", self.retrieval.retriever, RETRIEVERS
+            "model.graph_encoder", self.model.graph_encoder, _registered("graph_encoder")
         )
-        _choice("training.miner", self.training.miner, ("hard_negative",))
-        _choice("retrieval.metric", self.retrieval.metric, ("recall_at_k",))
+        _choice("retrieval.retriever", self.retrieval.retriever, _registered("retriever"))
+        _choice("training.miner", self.training.miner, _registered("miner"))
+        _choice("retrieval.metric", self.retrieval.metric, _registered("metric"))
         if self.retrieval.reranker is not None:
-            _choice("retrieval.reranker", self.retrieval.reranker, RERANKERS)
+            _choice(
+                "retrieval.reranker", self.retrieval.reranker, _registered("reranker")
+            )
+        # The dependency is checked before the backend names: telling the user
+        # that dynamics needs segmentation is more useful than telling them the
+        # backend is unknown, which is what they would see otherwise.
+        if self.text_dynamics.enabled and not self.segmentation.enabled:
+            raise ConfigError(
+                "text_dynamics.backend requires segmentation.backend: scoring text "
+                "against dynamic objects needs masks to score against"
+            )
+        self.preprocess.text_correction.validate(
+            "preprocess.text_correction", "text_correction"
+        )
+        self.ocr.validate("ocr", "ocr")
+        self.segmentation.validate("segmentation", "segmenter")
+        self.text_dynamics.validate("text_dynamics", "text_dynamics")
 
         if not self.dataset.sequences:
             raise ConfigError("dataset.sequences must not be empty")
@@ -275,6 +454,24 @@ class AppConfig:
         if self.runtime.num_workers < 0:
             raise ConfigError("runtime.num_workers must be non-negative")
         _validate_device(self.runtime.device)
+        if self.preprocess.text_min_length < 0:
+            raise ConfigError("preprocess.text_min_length must be non-negative")
+        if self.dataset.split_folds_path and self.dataset.split_fold < 0:
+            raise ConfigError("dataset.split_fold must be set with dataset.split_folds_path")
+        if self.model.text_fusion not in ("node", "additive", "set"):
+            raise ConfigError("model.text_fusion must be 'node', 'additive' or 'set'")
+        if not 0.0 <= self.model.text_dropout < 1.0:
+            raise ConfigError("model.text_dropout must be in [0, 1)")
+        if self.model.text_zero_init and self.model.text_fusion == "node":
+            raise ConfigError("model.text_zero_init requires text_fusion 'additive' or 'set'")
+        if self.model.descriptor_norm not in ("none", "pooled", "output"):
+            raise ConfigError("model.descriptor_norm must be 'none', 'pooled' or 'output'")
+        if not 0.0 <= self.training.negative_min_distance_m < float("inf"):
+            raise ConfigError("training.negative_min_distance_m must be a non-negative number")
+        if self.training.positive_max_distance_m < 0:
+            raise ConfigError("training.positive_max_distance_m must be non-negative")
+        if self.training.positive_max_distance_m > self.dataset.gt_radius_m:
+            raise ConfigError("training.positive_max_distance_m cannot exceed dataset.gt_radius_m")
         if not 0.0 <= self.preprocess.ocr_confidence_threshold <= 1.0:
             raise ConfigError(
                 "preprocess.ocr_confidence_threshold must be in [0, 1]"
@@ -290,6 +487,22 @@ class AppConfig:
                 raise ConfigError(f"{name} must be greater than zero")
         if self.training.weight_decay < 0:
             raise ConfigError("training.weight_decay must be non-negative")
+        _choice("training.loss", self.training.loss, ("triplet", "infonce"))
+        if not 0.0 <= self.training.positive_interval_fraction <= 1.0:
+            raise ConfigError("training.positive_interval_fraction must be in [0, 1]")
+        if self.training.positive_interval_fraction > 0 and self.training.positive_max_distance_m > 0:
+            raise ConfigError("positive_interval_fraction and positive_max_distance_m exclude each other")
+        _choice("dataset.split_guard", self.dataset.split_guard or "none", ("none", "ground_truth_overlap", "ground_truth_blocks"))
+        if (self.dataset.split_guard == "ground_truth_blocks") != bool(self.dataset.validation_centres):
+            raise ConfigError("dataset.validation_centres are required by, and only by, split_guard 'ground_truth_blocks'")
+        if any(not 0.0 < c < 1.0 for c in self.dataset.validation_centres):
+            raise ConfigError("dataset.validation_centres must lie in (0, 1)")
+        if list(self.dataset.validation_centres) != sorted(set(self.dataset.validation_centres)):
+            raise ConfigError("dataset.validation_centres must be increasing")
+        if self.training.miner_warmup_epochs < 0:
+            raise ConfigError("training.miner_warmup_epochs must be non-negative")
+        if not self.training.temperature > 0:
+            raise ConfigError("training.temperature must be greater than zero")
 
         _validate_recalls("training.recall_values", self.training.recall_values)
         _validate_recalls("retrieval.recall_values", self.retrieval.recall_values)
@@ -299,12 +512,8 @@ class AppConfig:
             self.training.early_stopping_metric,
             available_metrics,
         )
-        for name, value in {
-            "preprocess.text_encoder": self.preprocess.text_encoder,
-            "output.experiment_name": self.output.experiment_name,
-        }.items():
-            if not value.strip():
-                raise ConfigError(f"{name} cannot be empty")
+        if not self.output.experiment_name.strip():
+            raise ConfigError("output.experiment_name cannot be empty")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -428,6 +637,14 @@ def _convert(value: Any, annotation: Any, path: str) -> Any:
             _convert(item, args[0], f"{path}[{index}]")
             for index, item in enumerate(value)
         ]
+    if origin is dict:
+        # Component params are validated by the implementation that consumes
+        # them, so only the container shape is checked here.
+        if not isinstance(value, Mapping):
+            raise ConfigError(f"{path} must be a mapping")
+        if any(not isinstance(key, str) for key in value):
+            raise ConfigError(f"{path} keys must be strings")
+        return dict(value)
     if origin in (Union, UnionType):
         if value is None and type(None) in args:
             return None

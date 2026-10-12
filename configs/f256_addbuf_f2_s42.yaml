@@ -1,0 +1,60 @@
+dataset:
+  adapter: robotcar
+  root: /mnt/external_usb_hdd/6YL/Datasets/robotcar
+  sequences: [base, query]
+  traversals:
+    base: 2015-08-12-15-04-18
+    query: 2015-09-02-10-37-32
+  ocr_root_template: /home/sitnikov_sv/ocr_benchmark/results/robotcar_{traversal}
+  ocr_file_name: qwen3_vl_4b.json
+  scene_graph_root_template: /home/sitnikov_sv/tgseqloc_data/robotcar_scenegraphs_gemini/{sequence}
+  image_path_template: /mnt/external_usb_hdd/6YL/Datasets/robotcar/{traversal}_rgb/stereo_centre
+  ins_path_template: /mnt/external_usb_hdd/6YL/Datasets/robotcar/{traversal}/gps/ins.csv
+  gt_path: /mnt/external_usb_hdd/6YL/Datasets/robotcar/2015-08-12-15-04-18/gps/ins.csv
+  gt_radius_m: 25.0
+  frame_list_path: /home/sitnikov_sv/tgseqloc_data/robotcar_frames_7k.txt
+  split_folds_path: /home/sitnikov_sv/tgseqloc_data/robotcar_folds.json
+  split_fold: 2
+  prepared_root: /home/sitnikov_sv/tgseqloc_data/rcgf_real_qwen
+  reference_sequence: base
+  query_sequence: query
+  test_ratio: 0.2
+  validation_ratio: 0.1
+segmentation:
+  backend: yolo_seg
+  weights: yolo11x_seg
+  params:
+    confidence: 0.25
+text_dynamics:
+  backend: mask_ioa
+  params:
+    threshold: 0.5
+preprocess:
+  use_text_nodes: true
+  encoder_batch_size: 256
+  text_min_length: 3
+  text_drop_numeric: true
+  dynamic_node_classes: [car, adult, child, bike, bus, dog, cat, bag, hat]
+  text_encoder:
+    backend: char_ngram
+    params:
+      embedding_dim: 64
+model:
+  use_text_nodes: true
+  text_fusion: additive
+  text_dropout: 0.0
+  text_emb_dim: 64
+  hidden_dim: 256
+  proj_dim: 256
+training:
+  negative_min_distance_m: 50.0
+  epochs: 8
+  patience: 3
+  batch_size: 8
+  learning_rate: 3.0e-5
+runtime:
+  device: auto
+  seed: 42
+  deterministic: true
+output:
+  experiment_name: f256-addbuf-f2-s42

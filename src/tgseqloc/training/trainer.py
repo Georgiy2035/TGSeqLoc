@@ -5,7 +5,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import random
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from torch_geometric.data import Batch, Data
 from tgseqloc.evaluation import evaluate_retrieval
 from tgseqloc.models import EdgeAttrNormalizer, GATGraphEncoder
 
-from .mining import mine_hard_negatives
+from .mining import mine_hard_negatives, random_negatives
 
 
 def _plain(value: Any) -> Any:
@@ -162,6 +164,8 @@ class TripletGraphDataset(Dataset):
         text_emb_dim: int | None = None,
         seed: int = 0,
         edge_attr_dim: int | None = None,
+        ignored: Mapping[int, Sequence[int]] | Mapping[str, Sequence[int]] | None = None,
+        groups: tuple[Mapping[int, str], Sequence[str]] | None = None,
     ) -> None:
         if negatives_per_query < 1:
             raise ValueError("negatives_per_query must be positive")
@@ -178,11 +182,24 @@ class TripletGraphDataset(Dataset):
         self.seed = int(seed)
         self.epoch = 0
         self.hard_negatives: dict[int, list[int]] = {}
+        # Frames near enough to count as correct at evaluation but too far to be
+        # trained as positives: neither pulled in nor pushed away.
+        self.ignored = (
+            None
+            if ignored is None
+            else {int(k): [int(v) for v in values] for k, values in ignored.items()}
+        )
+        # (camera of each query, camera of each database frame): when given, a
+        # negative drawn without mining comes from the query's own camera.
+        self.groups = groups
         self.query_indices = []
         for query_index in map(int, query_indices):
             positive = set(self.positives.get(query_index, ()))
+            blocked = positive
+            if self.ignored is not None:
+                blocked = positive | set(self.ignored.get(query_index, ()))
             if positive and any(
-                index not in positive for index in range(len(self.database_paths))
+                index not in blocked for index in range(len(self.database_paths))
             ):
                 self.query_indices.append(query_index)
 
@@ -210,16 +227,20 @@ class TripletGraphDataset(Dataset):
         query_index = self.query_indices[local_index]
         rng = random.Random(self.seed + self.epoch * 100_003 + query_index)
         positive_index = rng.choice(self.positives[query_index])
+        blocked = self.positives[query_index]
+        if self.ignored is not None:
+            blocked = set(blocked) | set(self.ignored.get(query_index, ()))
         negatives = [
             item
             for item in self.hard_negatives.get(query_index, ())
-            if item not in self.positives[query_index]
+            if item not in blocked
         ]
         if not negatives:
             negatives = [
                 index
                 for index in range(len(self.database_paths))
-                if index not in self.positives[query_index]
+                if index not in blocked
+                and (self.groups is None or self.groups[1][index] == self.groups[0][query_index])
             ]
             rng.shuffle(negatives)
         if len(negatives) < self.negatives_per_query:
@@ -247,6 +268,128 @@ def collate_graphs(items) -> Batch:
     return Batch.from_data_list(flat)
 
 
+def contrastive_loss(query: torch.Tensor, positive: torch.Tensor, negatives: torch.Tensor, temperature: float) -> torch.Tensor:
+    """InfoNCE over one positive and the mined negatives of each query.
+
+    ``query`` and ``positive`` are [B, D], ``negatives`` is [B, N, D], all
+    L2-normalized. The logits are cosine similarities divided by the
+    temperature, and the positive is the target class. Unlike the triplet
+    hinge, which is active or not per negative at a fixed margin, the loss
+    compares the positive with every negative at once and weights them by how
+    close they come, with no margin to sit at.
+    """
+
+    positive_logit = (query * positive).sum(dim=1, keepdim=True)
+    negative_logits = torch.einsum("bd,bnd->bn", query, negatives)
+    logits = torch.cat((positive_logit, negative_logits), dim=1) / temperature
+    target = torch.zeros(query.shape[0], dtype=torch.long, device=query.device)
+    return nn.functional.cross_entropy(logits, target)
+
+
+def frame_group(path: str | Path) -> str:
+    """Camera of a prepared frame: the prefix of ``<camera>-<timestamp>``, empty for the primary camera."""
+
+    stem = Path(path).stem
+    return stem.split("-", 1)[0] if "-" in stem else ""
+
+
+def mine_within_groups(
+    miner,
+    database_embeddings,
+    query_embeddings,
+    query_indices: Sequence[int],
+    positives: Mapping[int, Sequence[int]],
+    negatives_per_query: int,
+    search_depth: int,
+    seed: int,
+    *,
+    database_groups: Sequence[str],
+    query_groups: Mapping[int, str],
+    exclusions: Mapping[int, Sequence[int]] | None = None,
+) -> dict[int, list[int]]:
+    """Run ``miner`` separately inside each camera.
+
+    Each query sees only the database frames of its own camera: the miner gets
+    that camera's descriptors, with positives and exclusions translated to local
+    indices, and its answer is translated back. With the same seed for every
+    camera the result for a camera does not depend on the others.
+    """
+
+    database = np.asarray(database_embeddings)
+    queries = np.asarray(query_embeddings)
+    rows_by_group: dict[str, list[int]] = defaultdict(list)
+    for row, query_index in enumerate(query_indices):
+        rows_by_group[query_groups[int(query_index)]].append(row)
+    members: dict[str, list[int]] = defaultdict(list)
+    for index, group in enumerate(database_groups):
+        members[group].append(index)
+    mined: dict[int, list[int]] = {}
+    for group, rows in rows_by_group.items():
+        local = members.get(group, [])
+        if not local:
+            mined.update({int(query_indices[row]): [] for row in rows})
+            continue
+        to_local = {index: position for position, index in enumerate(local)}
+        group_queries = [int(query_indices[row]) for row in rows]
+        local_positives = {
+            query: [to_local[item] for item in positives.get(query, ()) if item in to_local]
+            for query in group_queries
+        }
+        kwargs = {}
+        if exclusions is not None:
+            kwargs["exclusions"] = {
+                query: [to_local[item] for item in exclusions.get(query, ()) if item in to_local]
+                for query in group_queries
+            }
+        found = miner(
+            database[local], queries[rows], group_queries, local_positives,
+            negatives_per_query, search_depth, seed, **kwargs,
+        )
+        for query, items in found.items():
+            mined[int(query)] = [local[item] for item in items]
+    return mined
+
+
+def epochs_without_improvement(previous: int, improved: bool, epoch: int, warmup: int) -> int:
+    """Epochs counted towards early stopping.
+
+    Warm-up epochs on random negatives do not count: validation grows slowly
+    there, and the run must reach the switch to the configured miner before
+    patience can end it. Without a warm-up this is the usual counter.
+    """
+
+    if improved:
+        return 0
+    return previous + 1 if epoch > warmup else previous
+
+
+def seed_everything(seed: int, *, deterministic: bool = True) -> torch.Generator:
+    """Seed every generator a run draws from, and return one for DataLoader.
+
+    Called before the model is built, not after: weight initialization draws
+    from the global generator, so seeding inside train() left the starting
+    point random.
+
+    Seeding alone is not enough on a GPU. Graph aggregation sums messages with
+    atomic adds whose order varies between runs, so the same model on the same
+    input returns different numbers. ``deterministic`` pins that down; the
+    cuBLAS workspace variable has to be set before the handle is created,
+    which is why it is set here rather than left to the caller.
+    """
+
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True, warn_only=False)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
 def make_graph_loader(
     paths: Sequence[str | Path],
     edge_normalizer: EdgeAttrNormalizer | None = None,
@@ -257,6 +400,7 @@ def make_graph_loader(
     num_workers: int = 0,
     shuffle: bool = False,
     device: str | torch.device = "cpu",
+    generator: torch.Generator | None = None,
 ) -> DataLoader:
     dataset = GraphPathDataset(
         paths, edge_normalizer, text_emb_dim, edge_attr_dim=edge_attr_dim
@@ -268,6 +412,7 @@ def make_graph_loader(
         num_workers=num_workers,
         collate_fn=Batch.from_data_list,
         pin_memory=torch.device(device).type == "cuda",
+        generator=generator if shuffle else None,
     )
 
 
@@ -298,6 +443,9 @@ def encode_paths(
     outputs = [model(batch.to(device)).detach().cpu() for batch in loader]
     out_dim = int(getattr(model, "out_dim", 0))
     result = torch.cat(outputs) if outputs else torch.empty((0, out_dim))
+    if result.shape[0] != len(paths):
+        # A silent mismatch would pair descriptors with the wrong frames.
+        raise RuntimeError(f"encoded {result.shape[0]} descriptors for {len(paths)} graphs")
     return result.numpy().astype(np.float32) if as_numpy else result
 
 
@@ -305,12 +453,255 @@ def fit_edge_normalizer(
     paths: Sequence[str | Path],
     edge_attr_dim: int,
     log_indices: Sequence[int] | None = None,
+    *,
+    exclude_text_edges: bool = False,
 ) -> EdgeAttrNormalizer:
+    """Standardization statistics for edge attributes.
+
+    ``exclude_text_edges`` fits them on scene relations alone. The additive text
+    form never passes text edges to the encoder, and if their geometry still
+    entered these statistics a frame without text would be normalized
+    differently from the text-free pipeline.
+    """
+
     normalizer = EdgeAttrNormalizer(log_indices, feature_dim=edge_attr_dim)
     for path in paths:
         graph = load_graph(path, edge_attr_dim=edge_attr_dim)
-        normalizer.update(graph.edge_attr)
+        attributes = graph.edge_attr
+        text_edge = getattr(graph, "is_text_edge", None)
+        if exclude_text_edges and attributes is not None and text_edge is not None:
+            attributes = attributes[~text_edge.bool().reshape(-1)]
+        normalizer.update(attributes)
     return normalizer.finalize()
+
+
+def negative_exclusions(
+    split: Mapping[str, Any], query_indices: Sequence[int], radius: float
+) -> dict[int, list[int]]:
+    """Database frames too close to each query to be taken as its negatives.
+
+    Positives lie within the ground-truth radius; everything within ``radius``
+    is kept out of the negatives as well, so that the frames in between take no
+    part in training. Metric positions must be recorded in the split.
+    """
+
+    query_positions = split.get("query_positions")
+    database_positions = split.get("database_positions")
+    if not query_positions or not database_positions:
+        raise ValueError(
+            "training.negative_min_distance_m needs metric positions in the prepared "
+            "split; run prepare again with this configuration"
+        )
+    from tgseqloc.data.robotcar import build_radius_positives
+
+    wanted = {int(index) for index in query_indices}
+    # Ровно те координаты, по которым посчитан сам ground truth: число
+    # записано в сплит подготовкой. Считать здесь по другому числу осей
+    # значило бы отбирать негативы по одной метрике, а мерить по другой.
+    dimensions = int(split.get("gt_dimensions", 0) or 0)
+    cut = (lambda v: tuple(float(x) for x in v)[:dimensions]) if dimensions else (
+        lambda v: tuple(float(x) for x in v))
+    queries = {int(k): cut(v) for k, v in query_positions.items() if int(k) in wanted}
+    database = {int(k): cut(v) for k, v in database_positions.items()}
+    return build_radius_positives(queries, database, float(radius))
+
+
+def training_positives(
+    split: Mapping[str, Any], query_indices: Sequence[int], radius: float
+) -> dict[int, list[int]]:
+    """Ground-truth positives close enough to be trained as positives.
+
+    NetVLAD trains on positives within 10 metres and negatives beyond 25, and
+    leaves the frames in between out of training. Evaluation keeps the whole
+    ground truth; only the positives a triplet may draw from shrink. A query
+    with no ground-truth positive this close takes no part in training.
+    """
+
+    query_positions = split.get("query_positions")
+    database_positions = split.get("database_positions")
+    if not query_positions or not database_positions:
+        raise ValueError(
+            "training.positive_max_distance_m needs metric positions in the prepared "
+            "split; run prepare again with this configuration"
+        )
+    from tgseqloc.data.robotcar import build_radius_positives
+
+    wanted = {int(index) for index in query_indices}
+    # Ровно те координаты, по которым посчитан сам ground truth: число
+    # записано в сплит подготовкой. Считать здесь по другому числу осей
+    # значило бы отбирать негативы по одной метрике, а мерить по другой.
+    dimensions = int(split.get("gt_dimensions", 0) or 0)
+    cut = (lambda v: tuple(float(x) for x in v)[:dimensions]) if dimensions else (
+        lambda v: tuple(float(x) for x in v))
+    queries = {int(k): cut(v) for k, v in query_positions.items() if int(k) in wanted}
+    database = {int(k): cut(v) for k, v in database_positions.items()}
+    ground_truth = {int(k): {int(x) for x in v} for k, v in split.get("positives", {}).items()}
+    near = build_radius_positives(queries, database, float(radius))
+    kept = {q: sorted(set(v) & ground_truth.get(q, set())) for q, v in near.items()}
+    return {q: v for q, v in kept.items() if v}
+
+
+def central_positives(
+    positives: Mapping[int, Sequence[int]], query_indices: Sequence[int], fraction: float
+) -> dict[int, list[int]]:
+    """The central part of each query's interval of positives, for training.
+
+    The analogue of positives within 10 m of 25 m where ground truth is an
+    interval of reference frames rather than a distance: the frames nearest the
+    middle of the interval are trained as positives, the edges of the interval
+    are neither pulled in nor pushed away, and evaluation keeps the whole
+    interval. At least one frame is kept.
+    """
+
+    kept: dict[int, list[int]] = {}
+    for query in map(int, query_indices):
+        values = sorted(int(v) for v in positives.get(query, positives.get(str(query), ())))  # type: ignore[arg-type]
+        if not values:
+            continue
+        count = max(1, int(round(len(values) * float(fraction))))
+        start = (len(values) - count) // 2
+        kept[query] = values[start:start + count]
+    return kept
+
+
+def text_center_from_graphs(graphs, text_emb_dim: int) -> torch.Tensor:
+    """Mean embedding of every string in ``graphs``; zeros when there is none."""
+
+    total = torch.zeros(int(text_emb_dim), dtype=torch.float64)
+    count = 0
+    for graph in graphs:
+        is_text = getattr(graph, "is_text", None)
+        embeddings = getattr(graph, "text_emb", None)
+        if is_text is None or embeddings is None:
+            continue
+        rows = embeddings[is_text.bool().reshape(-1)]
+        if rows.numel():
+            total += rows.double().sum(dim=0)
+            count += int(rows.shape[0])
+    return (total / count).float() if count else total.float()
+
+
+def fit_text_center(paths: Sequence[str | Path], edge_attr_dim: int, text_emb_dim: int) -> torch.Tensor:
+    return text_center_from_graphs(
+        (load_graph(path, edge_attr_dim=edge_attr_dim) for path in paths), text_emb_dim
+    )
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def manifest_fingerprint(manifest: Mapping[str, Any]) -> str:
+    """Identity of prepared data, as recorded in checkpoints trained on it."""
+
+    explicit = manifest.get("preprocess_fingerprint", manifest.get("fingerprint"))
+    if explicit is not None:
+        return str(explicit)
+    payload = json.dumps(_plain(manifest), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def manifest_records_by_path(
+    manifest: Mapping[str, Any], data_root: Path
+) -> dict[Path, Mapping[str, Any]]:
+    raw_records = manifest.get("graph_records")
+    if raw_records is None:
+        return {}
+    normalized: list[Mapping[str, Any]] = []
+    if isinstance(raw_records, Mapping):
+        for raw_path, value in raw_records.items():
+            if isinstance(value, Mapping):
+                record = dict(value)
+                record.setdefault("path", raw_path)
+            else:
+                record = {"path": raw_path, "sha256": value}
+            normalized.append(record)
+    elif isinstance(raw_records, Sequence) and not isinstance(
+        raw_records, (str, bytes)
+    ):
+        if not all(isinstance(record, Mapping) for record in raw_records):
+            raise ValueError("manifest graph_records entries must be mappings")
+        normalized = [dict(record) for record in raw_records]
+    else:
+        raise ValueError("manifest graph_records must be a mapping or sequence")
+
+    records: dict[Path, Mapping[str, Any]] = {}
+    for record in normalized:
+        raw_path = next(
+            (
+                record[key]
+                for key in ("path", "graph_path", "relative_path")
+                if record.get(key) is not None
+            ),
+            None,
+        )
+        if raw_path is None:
+            raise ValueError("manifest graph record is missing its path")
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path(data_root) / path
+        canonical = path.resolve()
+        if canonical in records:
+            raise ValueError(f"duplicate manifest graph record for {path}")
+        records[canonical] = record
+    return records
+
+
+def validate_graph_records(
+    manifest: Mapping[str, Any], data_root: Path, paths: Sequence[Path]
+) -> None:
+    """Check that every graph to be encoded is the one preparation wrote.
+
+    A graph is compared with the manifest by file hash and preprocessing
+    fingerprint, once, before any model work.
+    """
+
+    if "graph_records" not in manifest:
+        return
+    records = manifest_records_by_path(manifest, data_root)
+    expected_paths = {Path(path).resolve() for path in paths}
+    missing = sorted(str(path) for path in expected_paths - records.keys())
+    if missing:
+        preview = ", ".join(missing[:3])
+        suffix = " ..." if len(missing) > 3 else ""
+        raise ValueError(
+            f"split graph path is absent from manifest graph_records: "
+            f"{preview}{suffix}"
+        )
+    for path in sorted(expected_paths, key=str):
+        record = records[path]
+        if not path.is_file():
+            raise ValueError(f"manifest graph file does not exist: {path}")
+        expected_sha = record.get("sha256", record.get("file_sha256"))
+        if not isinstance(expected_sha, str) or not expected_sha:
+            raise ValueError(
+                f"manifest graph record has no SHA256 for {path}"
+            )
+        actual_sha = file_sha256(path)
+        if actual_sha != expected_sha:
+            raise ValueError(f"graph file SHA256 mismatch for {path}")
+        expected_fingerprint = record.get(
+            "expected_fingerprint",
+            record.get(
+                "preprocess_fingerprint",
+                record.get("fingerprint", manifest_fingerprint(manifest)),
+            ),
+        )
+        graph = _torch_load(path)
+        actual_fingerprint = (
+            graph.get("preprocess_fingerprint")
+            if isinstance(graph, Mapping)
+            else getattr(graph, "preprocess_fingerprint", None)
+        )
+        if actual_fingerprint != expected_fingerprint:
+            raise ValueError(
+                f"graph preprocessing fingerprint mismatch for {path}: "
+                f"expected {expected_fingerprint!r}, got {actual_fingerprint!r}"
+            )
 
 
 class Trainer:
@@ -351,6 +742,7 @@ class Trainer:
         if split_value is None:
             raise ValueError("a prepared split mapping or split JSON path is required")
         self.split = _load_json(split_value, self.data_root)
+        self._check_split_matches_config()
         self._prepare_split()
         self._validate_manifest_graph_records()
         requested_device = device or _get(
@@ -371,6 +763,33 @@ class Trainer:
         self.start_epoch = 1
         self.best_metric = float("-inf")
         self.run_dir = self._resolve_run_dir()
+
+    def _check_split_matches_config(self) -> None:
+        """Refuse a split written for another protocol.
+
+        Preparation writes the split into the prepared root, and one root serves
+        several protocols -- a single time cut and every fold of the block cross
+        validation. Training that silently read a split left there by another
+        protocol would report numbers for a test set nobody asked for.
+        """
+
+        folds_path = _get(self.config, "dataset.split_folds_path", default="")
+        # Фолды задаются либо файлом разбиения, либо их числом: у RobotCar
+        # первое, у Первомайской второе. Проверка одна и та же.
+        fold_count = int(_get(self.config, "dataset.split_fold_count", default=0) or 0)
+        recorded = self.split.get("split_fold")
+        if folds_path or fold_count:
+            expected = int(_get(self.config, "dataset.split_fold", default=-1))
+            if recorded is None or int(recorded) != expected:
+                raise ValueError(
+                    f"the prepared split is for fold {recorded}, the configuration "
+                    f"asks for fold {expected}; run prepare with this configuration"
+                )
+        elif recorded is not None:
+            raise ValueError(
+                f"the prepared split is fold {recorded} of a cross validation, the "
+                "configuration asks for a single split; run prepare with this configuration"
+            )
 
     def _paths(self, key: str, fallback_dir: str) -> list[Path]:
         values = self.split.get(key)
@@ -409,102 +828,17 @@ class Trainer:
 
     @staticmethod
     def _file_sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+        return file_sha256(path)
 
     def _manifest_records_by_path(self) -> dict[Path, Mapping[str, Any]]:
-        raw_records = self.manifest.get("graph_records")
-        if raw_records is None:
-            return {}
-        normalized: list[Mapping[str, Any]] = []
-        if isinstance(raw_records, Mapping):
-            for raw_path, value in raw_records.items():
-                if isinstance(value, Mapping):
-                    record = dict(value)
-                    record.setdefault("path", raw_path)
-                else:
-                    record = {"path": raw_path, "sha256": value}
-                normalized.append(record)
-        elif isinstance(raw_records, Sequence) and not isinstance(
-            raw_records, (str, bytes)
-        ):
-            if not all(isinstance(record, Mapping) for record in raw_records):
-                raise ValueError("manifest graph_records entries must be mappings")
-            normalized = [dict(record) for record in raw_records]
-        else:
-            raise ValueError("manifest graph_records must be a mapping or sequence")
-
-        records: dict[Path, Mapping[str, Any]] = {}
-        for record in normalized:
-            raw_path = next(
-                (
-                    record[key]
-                    for key in ("path", "graph_path", "relative_path")
-                    if record.get(key) is not None
-                ),
-                None,
-            )
-            if raw_path is None:
-                raise ValueError("manifest graph record is missing its path")
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = self.data_root / path
-            canonical = path.resolve()
-            if canonical in records:
-                raise ValueError(f"duplicate manifest graph record for {path}")
-            records[canonical] = record
-        return records
+        return manifest_records_by_path(self.manifest, self.data_root)
 
     def _validate_manifest_graph_records(self) -> None:
         """Validate declared prepared graphs once before any model work."""
 
-        if "graph_records" not in self.manifest:
-            return
-        records = self._manifest_records_by_path()
-        expected_paths = {
-            path.resolve() for path in self.database_paths + self.query_paths
-        }
-        missing = sorted(str(path) for path in expected_paths - records.keys())
-        if missing:
-            preview = ", ".join(missing[:3])
-            suffix = " ..." if len(missing) > 3 else ""
-            raise ValueError(
-                f"split graph path is absent from manifest graph_records: "
-                f"{preview}{suffix}"
-            )
-        for path in sorted(expected_paths, key=str):
-            record = records[path]
-            if not path.is_file():
-                raise ValueError(f"manifest graph file does not exist: {path}")
-            expected_sha = record.get("sha256", record.get("file_sha256"))
-            if not isinstance(expected_sha, str) or not expected_sha:
-                raise ValueError(
-                    f"manifest graph record has no SHA256 for {path}"
-                )
-            actual_sha = self._file_sha256(path)
-            if actual_sha != expected_sha:
-                raise ValueError(f"graph file SHA256 mismatch for {path}")
-            expected_fingerprint = record.get(
-                "expected_fingerprint",
-                record.get(
-                    "preprocess_fingerprint",
-                    record.get("fingerprint", self.fingerprint),
-                ),
-            )
-            graph = _torch_load(path)
-            actual_fingerprint = (
-                graph.get("preprocess_fingerprint")
-                if isinstance(graph, Mapping)
-                else getattr(graph, "preprocess_fingerprint", None)
-            )
-            if actual_fingerprint != expected_fingerprint:
-                raise ValueError(
-                    f"graph preprocessing fingerprint mismatch for {path}: "
-                    f"expected {expected_fingerprint!r}, got {actual_fingerprint!r}"
-                )
+        validate_graph_records(
+            self.manifest, self.data_root, self.database_paths + self.query_paths
+        )
 
     def _manifest_int(self, *names: str, default=None) -> int:
         for name in names:
@@ -526,13 +860,7 @@ class Trainer:
 
     @property
     def fingerprint(self) -> str:
-        explicit = self.manifest.get(
-            "preprocess_fingerprint", self.manifest.get("fingerprint")
-        )
-        if explicit is not None:
-            return str(explicit)
-        payload = json.dumps(_plain(self.manifest), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return manifest_fingerprint(self.manifest)
 
     def _build_model(self) -> GATGraphEncoder:
         model_config = _get(self.config, "model", default={})
@@ -579,6 +907,7 @@ class Trainer:
         runtime_names = {
             "seed": "runtime.seed",
             "num_workers": "runtime.num_workers",
+            "deterministic": "runtime.deterministic",
         }
         names = [f"training.{name}", name]
         if name in runtime_names:
@@ -829,6 +1158,9 @@ class Trainer:
 
     def train(self, resume_from: str | Path | None = None) -> dict:
         seed = int(self._training_value("seed", 42))
+        generator = seed_everything(
+            seed, deterministic=bool(self._training_value("deterministic", True))
+        )
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -842,21 +1174,57 @@ class Trainer:
                 self._normalizer_paths(),
                 self.edge_attr_dim,
                 _get(self.config, "normalization.log_indices", default=None),
+                exclude_text_edges=getattr(self.model, "text_fusion", "node") != "node",
             )
+            if getattr(self.model, "text_centering", False) and getattr(self.model, "text_center", None) is not None:
+                self.model.text_center.copy_(
+                    fit_text_center(
+                        self._normalizer_paths(), self.edge_attr_dim, self.text_emb_dim
+                    ).to(self.model.text_center.device)
+                )
 
         negatives_per_query = int(
             self._training_value("negatives_per_query", 2)
         )
+        positive_radius = float(self._training_value("positive_max_distance_m", 0.0) or 0.0)
+        train_positives, ignored = self.positives, None
+        if positive_radius > 0:
+            train_positives = training_positives(
+                self.split, self.train_query_indices, positive_radius
+            )
+            ignored = self.positives
+        interval_fraction = float(self._training_value("positive_interval_fraction", 0.0) or 0.0)
+        if interval_fraction > 0:
+            if positive_radius > 0:
+                raise ValueError("positive_interval_fraction and positive_max_distance_m exclude each other")
+            train_positives = central_positives(self.positives, self.train_query_indices, interval_fraction)
+            ignored = self.positives
+        # Triplets inside one camera: a side frame and a front frame at the same
+        # spot look at different things, so the positive and the negatives are
+        # taken from the query's own camera. Evaluation is left unchanged.
+        same_camera = bool(self._training_value("same_camera_triplets", False))
+        groups = None
+        if same_camera:
+            database_groups = [frame_group(path) for path in self.database_paths]
+            query_groups = {index: frame_group(path) for index, path in enumerate(self.query_paths)}
+            groups = (query_groups, database_groups)
+            train_positives = {
+                query: kept
+                for query, values in train_positives.items()
+                if (kept := [item for item in values if database_groups[int(item)] == query_groups[int(query)]])
+            }
         dataset = TripletGraphDataset(
             self.database_paths,
             self.query_paths,
             self.train_query_indices,
-            self.positives,
+            train_positives,
             negatives_per_query,
             self.normalizer,
             self.text_emb_dim,
             seed,
             self.edge_attr_dim,
+            **({"ignored": ignored} if ignored is not None else {}),
+            **({"groups": groups} if groups is not None else {}),
         )
         if not dataset:
             raise ValueError("no train query has both positives and negative candidates")
@@ -867,20 +1235,32 @@ class Trainer:
             num_workers=int(self._training_value("num_workers", 0)),
             collate_fn=collate_graphs,
             pin_memory=self.device.type == "cuda",
+            generator=generator,
         )
         criterion = nn.TripletMarginLoss(
             margin=float(self._training_value("margin", 0.3)), p=2
         )
+        loss_name = str(self._training_value("loss", "triplet"))
+        temperature = float(self._training_value("temperature", 0.07))
         epochs = int(self._training_value("epochs", 30))
+        warmup = int(self._training_value("miner_warmup_epochs", 0) or 0)
         patience = int(self._training_value("patience", 7))
         no_improvement = 0
         history = []
+        buffer = float(self._training_value("negative_min_distance_m", 0.0) or 0.0)
+        exclusions = (
+            negative_exclusions(self.split, dataset.query_indices, buffer) if buffer > 0 else None
+        )
         for epoch in range(self.start_epoch, epochs + 1):
             database_embeddings = self._encode(self.database_paths)
             query_embeddings = self._encode(
                 [self.query_paths[index] for index in dataset.query_indices]
             )
-            hard = self.miner(
+            # Warm-up on random negatives: while descriptors are still nearly
+            # equal, the "hardest" negatives are indistinguishable from the query
+            # and the triplet loss stays at its margin.
+            miner = random_negatives if epoch <= warmup else self.miner
+            mine_args = (
                 database_embeddings,
                 query_embeddings,
                 dataset.query_indices,
@@ -889,6 +1269,13 @@ class Trainer:
                 int(self._training_value("hard_search_depth", 256)),
                 seed + epoch,
             )
+            mine_kwargs = {"exclusions": exclusions} if exclusions is not None else {}
+            if groups is not None:
+                hard = mine_within_groups(
+                    miner, *mine_args, database_groups=groups[1], query_groups=groups[0], **mine_kwargs
+                )
+            else:
+                hard = miner(*mine_args, **mine_kwargs)
             dataset.set_epoch(epoch)
             dataset.set_hard_negatives(hard)
             self.model.train()
@@ -900,13 +1287,16 @@ class Trainer:
                 query = embeddings[:, 0]
                 positive = embeddings[:, 1]
                 negatives = embeddings[:, 2:]
-                loss = criterion(
-                    query[:, None, :].expand_as(negatives).reshape(-1, self.model.out_dim),
-                    positive[:, None, :]
-                    .expand_as(negatives)
-                    .reshape(-1, self.model.out_dim),
-                    negatives.reshape(-1, self.model.out_dim),
-                )
+                if loss_name == "infonce":
+                    loss = contrastive_loss(query, positive, negatives, temperature)
+                else:
+                    loss = criterion(
+                        query[:, None, :].expand_as(negatives).reshape(-1, self.model.out_dim),
+                        positive[:, None, :]
+                        .expand_as(negatives)
+                        .reshape(-1, self.model.out_dim),
+                        negatives.reshape(-1, self.model.out_dim),
+                    )
                 assert self.optimizer is not None
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -936,9 +1326,7 @@ class Trainer:
             improved = metric > self.best_metric
             if improved:
                 self.best_metric = metric
-                no_improvement = 0
-            else:
-                no_improvement += 1
+            no_improvement = epochs_without_improvement(no_improvement, improved, epoch, warmup)
             checkpoint = self._checkpoint(epoch, metric, epoch_metrics)
             self._save_checkpoint(self.run_dir / "last_model.pth", checkpoint)
             if improved:

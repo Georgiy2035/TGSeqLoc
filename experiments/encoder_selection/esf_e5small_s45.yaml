@@ -1,0 +1,39 @@
+dataset:
+  adapter: v4rl
+  root: /mnt/external_usb_hdd/6YL/Datasets/v4rl
+  sequences: [seq1, seq2]
+  ocr_root_template: /home/sitnikov_sv/ocr_benchmark/results/v4rl_{sequence}
+  scene_graph_root_template: /mnt/external_usb_hdd/6YL/Datasets/v4rl_llm/{sequence}_scenegraphs
+  gt_path: /mnt/external_usb_hdd/6YL/Datasets/v4rl/gt_shop_street_1/gt_shop_street_1.txt
+  prepared_root: /home/sitnikov_sv/tgseqloc_data/es_e5small
+  reference_sequence: seq1
+  query_sequence: seq2
+  test_ratio: 0.2
+  validation_ratio: 0.1
+  interpolate_gt: true
+  chunk_size: 200
+preprocess:
+  use_text_nodes: true
+  encoder_batch_size: 256
+  text_encoder:
+    backend: multilingual_e5
+    params:
+      model_name: intfloat/multilingual-e5-small
+      prefix: 'passage: '
+      pooling: mean
+model:
+  use_text_nodes: true
+  text_emb_dim: 384
+  hidden_dim: 128
+  proj_dim: 64
+training:
+  epochs: 8
+  patience: 3
+  batch_size: 8
+  learning_rate: 1.0e-5
+runtime:
+  device: auto
+  seed: 45
+  deterministic: true
+output:
+  experiment_name: esf-e5small-s45

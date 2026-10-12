@@ -8,9 +8,14 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .schema import FrameRecord
+from .formats import FrameRecord, FrameText, TextDetection
 
 FRAME_RE = re.compile(r"^(?P<index>\d{6})_(?P<timestamp>\d{19})\.(?:png|jpg|jpeg)$", re.I)
+#: Sidecar name written by the recognizer used for the reported experiments.
+#: Other recognizers write beside it under their own name; see
+#: :func:`discover_v4rl_records`.
+DEFAULT_OCR_FILE_NAME = "paddleocr_v5.json"
+
 DEFAULT_NOOP_TEXTS = frozenset(
     {"", "none", "null", "n/a", "no text", "[no text]", "<no_text>", "<no text>"}
 )
@@ -38,8 +43,21 @@ def discover_v4rl_records(
     *,
     chunk_size: int = 200,
     require_inputs: bool = True,
+    require_ocr: bool | None = None,
+    ocr_file_name: str = DEFAULT_OCR_FILE_NAME,
 ) -> list[FrameRecord]:
-    """Discover ordered frames and their chunked graph/OCR sidecars."""
+    """Discover ordered frames and their chunked graph/OCR sidecars.
+
+    ``require_ocr`` overrides ``require_inputs`` for the OCR sidecar alone:
+    when the pipeline runs recognition itself, demanding a file another tool
+    was supposed to produce would defeat the point of the stage.
+
+    ``ocr_file_name`` selects which recognizer's sidecar to read. Every
+    recognizer writes the same schema into the same per-frame directory under
+    its own name, so swapping models is a change of file name rather than of
+    directory tree -- which is what lets an OCR ablation reuse one set of
+    scene graphs, splits and ground truth.
+    """
 
     records: list[FrameRecord] = []
     for sequence in sequences:
@@ -55,14 +73,15 @@ def discover_v4rl_records(
             ocr_path = (
                 Path(ocr_root_template.format(sequence=sequence, chunk=chunk))
                 / image_path.stem
-                / "paddleocr_v5.json"
+                / ocr_file_name
             )
             graph_path = (
                 Path(graph_root_template.format(sequence=sequence, chunk=chunk))
                 / f"{sequence}_c{chunk:03d}"
                 / f"{local:06d}.json"
             )
-            if require_inputs and not ocr_path.is_file():
+            need_ocr = require_inputs if require_ocr is None else require_ocr
+            if need_ocr and not ocr_path.is_file():
                 raise FileNotFoundError(f"Missing OCR for {sequence} frame {index}: {ocr_path}")
             if require_inputs and not graph_path.is_file():
                 raise FileNotFoundError(
@@ -86,6 +105,33 @@ def discover_v4rl_records(
     return records
 
 
+def discover_frames(
+    dataset_root: str | Path,
+    ocr_root_template: str,
+    graph_root_template: str,
+    sequences: Sequence[str] = ("seq1", "seq2"),
+    *,
+    chunk_size: int = 200,
+) -> list[tuple[str, str, Path]]:
+    """Frames as ``(sequence, stem, image path)`` for the model stages.
+
+    Sidecars are not required: a stage computes what a sidecar would otherwise
+    have provided, so demanding one first would be circular.
+    """
+
+    return [
+        (record.sequence, record.stem, record.image_path)
+        for record in discover_v4rl_records(
+            dataset_root,
+            ocr_root_template,
+            graph_root_template,
+            sequences,
+            chunk_size=chunk_size,
+            require_inputs=False,
+        )
+    ]
+
+
 def _prediction_rows(data: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     rows = data.get("predictions", data.get("results", data.get("ocr", [])))
     if isinstance(rows, Mapping):
@@ -99,8 +145,18 @@ def parse_paddleocr(
     *,
     noop_texts: Iterable[str] = DEFAULT_NOOP_TEXTS,
     prediction_filter: Callable[[Mapping[str, Any], float], bool] | None = None,
-) -> tuple[list[list[float]], list[str]]:
-    """Parse PaddleOCR JSON into normalized xyxy boxes and useful strings."""
+) -> FrameText:
+    """Parse a precomputed recognizer sidecar into the canonical frame format.
+
+    Every recognizer in the benchmark writes this schema, so the parser is not
+    specific to PaddleOCR despite the name it is registered under.
+
+    Confidence may be absent: a generative recognizer produces text, not a
+    calibrated score, and Qwen3-VL writes ``null`` on every prediction. Absent
+    is not zero -- scoring it as zero would let any positive threshold silently
+    empty that arm of a comparison -- so an unreported confidence passes every
+    threshold instead.
+    """
 
     data = load_json(path)
     width = float(data.get("image_width", data.get("width", 0)))
@@ -108,10 +164,10 @@ def parse_paddleocr(
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid OCR image dimensions in {path}")
     noops = {str(value).strip().casefold() for value in noop_texts}
-    boxes: list[list[float]] = []
-    texts: list[str] = []
+    detections: list[TextDetection] = []
     for row in _prediction_rows(data):
-        confidence = float(row.get("confidence", row.get("score", 0.0)))
+        reported = row.get("confidence", row.get("score"))
+        confidence = 1.0 if reported is None else float(reported)
         if prediction_filter is not None:
             if not prediction_filter(row, confidence_threshold):
                 continue
@@ -141,17 +197,33 @@ def parse_paddleocr(
             min(1.0, max(0.0, y2 / height)),
         ]
         if normalized[2] > normalized[0] and normalized[3] > normalized[1]:
-            boxes.append(normalized)
-            texts.append(text)
-    return boxes, texts
+            detections.append(
+                TextDetection(
+                    box=tuple(normalized), text=text, confidence=confidence
+                )
+            )
+    return FrameText(
+        detections=tuple(detections),
+        image_size=(int(width), int(height)),
+        model_identity={"backend": "precomputed_paddleocr", "source": str(path)},
+    )
 
 
 def parse_scene_graph(
-    path: str | Path, class_to_idx: Mapping[str, int]
+    path: str | Path,
+    class_to_idx: Mapping[str, int],
+    dynamic_classes: Iterable[str] = (),
 ) -> tuple[list[dict[str, Any]], list[tuple[int, int, str]], int]:
-    """Parse an external node-link scene graph, dropping dangling edges."""
+    """Parse an external node-link scene graph, dropping dangling edges.
+
+    ``dynamic_classes`` removes ephemeral objects by name. The generator labels
+    every object, so a class is a stronger statement about ephemerality than a
+    segmentation mask -- and it is what the generator's own static mode uses.
+    Edges touching a removed node go with it.
+    """
 
     graph = load_json(path)
+    ephemeral = {str(name).strip().casefold() for name in dynamic_classes}
     nodes: list[dict[str, Any]] = []
     id_to_index: dict[Any, int] = {}
     for raw in graph.get("nodes", []):
@@ -163,6 +235,8 @@ def parse_scene_graph(
         if x2 <= x1 or y2 <= y1:
             continue
         name = str(payload.get("class_name", payload.get("label", "unknown"))).strip() or "unknown"
+        if name.casefold() in ephemeral:
+            continue
         identifier = raw.get("id", payload.get("id"))
         id_to_index[identifier] = len(nodes)
         nodes.append(
@@ -189,18 +263,43 @@ def parse_scene_graph(
 
 def build_vocabularies(
     records: Iterable[FrameRecord],
+    dynamic_classes: Iterable[str] = (),
 ) -> tuple[dict[str, int], dict[str, int]]:
+    ephemeral = {str(name).strip().casefold() for name in dynamic_classes}
     classes, labels = {"unknown"}, {"unknown"}
     for record in records:
         graph = load_json(record.graph_path)
         for raw in graph.get("nodes", []):
             payload = raw.get("data", raw)
-            classes.add(str(payload.get("class_name", payload.get("label", "unknown"))).strip() or "unknown")
+            name = str(payload.get("class_name", payload.get("label", "unknown"))).strip() or "unknown"
+            if name.casefold() in ephemeral:
+                continue
+            classes.add(name)
         for raw in graph.get("links", graph.get("edges", [])):
             labels.add(str(raw.get("label", raw.get("type", "unknown"))).strip() or "unknown")
     class_to_idx = {"unknown": 0, **{name: index for index, name in enumerate(sorted(classes - {"unknown"}), 1)}}
     edge_to_idx = {"unknown": 0, **{name: index for index, name in enumerate(sorted(labels - {"unknown"}), 1)}}
     return class_to_idx, edge_to_idx
+
+
+def load_vocabularies(manifest_path: str | Path) -> tuple[dict[str, int], dict[str, int]]:
+    """Node-class and relation vocabularies of an existing prepared dataset.
+
+    A class the other dataset never saw is absent here and is read as
+    ``unknown``, exactly as an unseen class of the same dataset would be.
+    """
+
+    manifest = load_json(manifest_path)
+    vocabularies = []
+    for key in ("node_class_to_idx", "edge_label_to_idx"):
+        vocabulary = manifest.get(key)
+        if not isinstance(vocabulary, dict) or vocabulary.get("unknown") != 0:
+            raise ValueError(f"{manifest_path} has no {key} with 'unknown' at index 0")
+        indices = sorted(int(index) for index in vocabulary.values())
+        if indices != list(range(len(indices))):
+            raise ValueError(f"{manifest_path}: {key} indices are not contiguous from 0")
+        vocabularies.append({str(name): int(index) for name, index in vocabulary.items()})
+    return vocabularies[0], vocabularies[1]
 
 
 def _nearest(records: Sequence[FrameRecord], timestamp: int, tolerance_ns: int) -> tuple[FrameRecord, int, bool]:
@@ -353,6 +452,114 @@ def build_temporal_split(
         "positives": {int(k): list(v) for k, v in positives.items()},
         "train_query_indices": train, "validation_query_indices": validation,
         "test_query_indices": test, "test_start": test_start,
+    }
+
+
+def separate_by_ground_truth(split: Mapping[str, Any]) -> dict[str, Any]:
+    """Make the parts of a V4RL split share no ground-truth database frame.
+
+    Validation is the tail of the training segment and the test follows it, so
+    queries on either side of a cut look at the same stretch of the reference
+    sequence, and a place revisited later in the query sequence can land in the
+    test while its first visit trained the model. V4RL gives no metric
+    positions, but its ground truth is a set of reference frames per query:
+    a validation query is dropped when one of its positives is a positive of a
+    training query, and a test query when one of its positives belongs to a
+    training or a kept validation query. The dropped queries are recorded.
+    """
+
+    positives = {int(k): {int(v) for v in values} for k, values in split["positives"].items()}
+    train = [int(i) for i in split["train_query_indices"]]
+    seen = set().union(*(positives.get(i, set()) for i in train)) if train else set()
+    validation, dropped_validation = [], []
+    for index in split["validation_query_indices"]:
+        (dropped_validation if positives.get(int(index), set()) & seen else validation).append(int(index))
+    seen_before_test = seen.union(*(positives.get(i, set()) for i in validation)) if validation else seen
+    test, dropped_test = [], []
+    for index in split["test_query_indices"]:
+        (dropped_test if positives.get(int(index), set()) & seen_before_test else test).append(int(index))
+    if not test:
+        raise RuntimeError("separating the split by ground truth left no test query")
+    return {
+        **dict(split),
+        "validation_query_indices": validation,
+        "test_query_indices": test,
+        "excluded_validation_indices": dropped_validation,
+        "excluded_test_indices": dropped_test,
+        "split_guard": "ground_truth_overlap",
+    }
+
+
+def build_block_split(
+    query_count: int,
+    positives: Mapping[int, Sequence[int]],
+    *,
+    test_ratio: float = 0.2,
+    validation_ratio: float = 0.1,
+    validation_centres: Sequence[float],
+) -> dict[str, Any]:
+    """A V4RL split whose validation is several blocks spread along the route.
+
+    Recall along the V4RL route changes by tens of points from one hundred
+    queries to the next: a model without text found 1 % of one stretch and
+    91 % of its neighbour. A validation set that is one contiguous stretch
+    therefore measures where it happens to lie, and the epoch it selects is
+    close to random. Blocks centred at fixed fractions of the route average
+    over places; their positions are a rule, not a choice made by looking at
+    results.
+
+    The test is the tail of the query sequence, as in the temporal split, and
+    is kept whole. Ground truth is a set of reference frames per query, and the
+    parts must not share one: validation queries sharing a frame with the test
+    are dropped, then training queries sharing a frame with the test or with
+    the kept validation. Training pays for the separation, so that the sets
+    that are measured stay the size the protocol names.
+    """
+
+    if not validation_centres:
+        raise ValueError("validation_centres must name at least one block")
+    if not 0 < test_ratio < 1 or not 0 < validation_ratio < 1:
+        raise ValueError("split ratios must satisfy 0 < test < 1 and 0 < validation < 1")
+    test_start = int(query_count * (1 - test_ratio))
+    before = sorted(index for index in positives if index < test_start)
+    test = sorted(index for index in positives if index >= test_start)
+    if not before or not test:
+        raise RuntimeError("the block split needs annotated queries before and after the test start")
+    width = max(1, int(len(before) * validation_ratio / len(validation_centres)))
+    blocks: list[list[int]] = []
+    for centre in validation_centres:
+        start = min(max(0, int(len(before) * float(centre)) - width // 2), len(before) - width)
+        block = before[start:start + width]
+        if blocks and block[0] <= blocks[-1][-1]:
+            raise ValueError("validation blocks overlap; use fewer blocks or a smaller validation_ratio")
+        blocks.append(block)
+
+    frames = {int(k): {int(v) for v in values} for k, values in positives.items()}
+    test_frames = set().union(*(frames[i] for i in test))
+    candidates = [index for block in blocks for index in block]
+    validation = [i for i in candidates if not frames[i] & test_frames]
+    dropped_validation = [i for i in candidates if frames[i] & test_frames]
+    held_frames = test_frames.union(*(frames[i] for i in validation)) if validation else test_frames
+    in_validation = set(candidates)
+    train, dropped_train = [], []
+    for index in before:
+        if index in in_validation:
+            continue
+        (dropped_train if frames[index] & held_frames else train).append(index)
+    if not train or not validation:
+        raise RuntimeError("the block split left no training or no validation query")
+    return {
+        "positives": {int(k): list(v) for k, v in positives.items()},
+        "train_query_indices": train,
+        "validation_query_indices": validation,
+        "test_query_indices": test,
+        "test_start": test_start,
+        "validation_blocks": [[block[0], block[-1]] for block in blocks],
+        "validation_centres": [float(c) for c in validation_centres],
+        "excluded_train_indices": dropped_train,
+        "excluded_validation_indices": dropped_validation,
+        "excluded_test_indices": [],
+        "split_guard": "ground_truth_blocks",
     }
 
 

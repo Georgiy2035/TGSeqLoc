@@ -9,7 +9,6 @@ from typing import Any
 
 from tgseqloc.components import component_map, register_builtin_components
 from tgseqloc.config import AppConfig
-from tgseqloc.data.v4rl import discover_v4rl_records
 from tgseqloc.registry import registry
 from tgseqloc.training import Trainer
 
@@ -36,7 +35,7 @@ class PipelineRunner:
             ("source", self.config.sources.ocr),
             ("source", self.config.sources.scene_graph),
             ("filter", self.config.preprocess.text_filter),
-            ("encoder", self.config.preprocess.text_encoder_backend),
+            ("encoder", str(self.config.preprocess.text_encoder.backend)),
             ("fusion", self.config.preprocess.fusion),
             ("graph_encoder", self.config.model.graph_encoder),
             ("miner", self.config.training.miner),
@@ -58,7 +57,12 @@ class PipelineRunner:
 
     @property
     def split_path(self) -> Path:
-        return self.prepared_data_root / "mappings" / "temporal_split.json"
+        # Each fold of a block cross validation has a file of its own, so that
+        # preparing one fold never overwrites the split another protocol reads.
+        mappings = self.prepared_data_root / "mappings"
+        if self.config.dataset.split_folds_path or self.config.dataset.split_fold_count:
+            return mappings / f"split_fold{int(self.config.dataset.split_fold)}.json"
+        return mappings / "temporal_split.json"
 
     def validate(self, *, check_inputs: bool = True) -> dict[str, Any]:
         """Validate configuration, registered names, and precomputed inputs."""
@@ -70,18 +74,16 @@ class PipelineRunner:
             "prepared_data_root": str(self.prepared_data_root),
         }
         if check_inputs:
-            records = discover_v4rl_records(
-                self.config.dataset.root,
-                self.config.dataset.ocr_root_template,
-                self.config.dataset.scene_graph_root_template,
-                self.config.dataset.sequences,
-                chunk_size=self.config.dataset.chunk_size,
-            )
-            if not self.config.dataset.gt_path.is_file():
-                raise FileNotFoundError(
-                    f"Missing V4RL ground truth: {self.config.dataset.gt_path}"
+            # Input discovery belongs to the dataset adapter: the orchestrator
+            # must not know how any particular dataset is laid out on disk.
+            adapter = registry.get("dataset", self.config.dataset.adapter)
+            discover = getattr(adapter, "discover_inputs", None)
+            if discover is None:
+                raise RuntimeError(
+                    f"dataset adapter {self.config.dataset.adapter!r} does not expose "
+                    "discover_inputs; run with check_inputs disabled or implement it"
                 )
-            result["source_frame_count"] = len(records)
+            result["source_frame_count"] = discover(self.config)
         return result
 
     def prepare(self, **kwargs: Any) -> dict[str, Any]:
@@ -92,7 +94,7 @@ class PipelineRunner:
         return adapter(
             self.config,
             text_encoder_factory=registry.get(
-                "encoder", self.config.preprocess.text_encoder_backend
+                "encoder", str(self.config.preprocess.text_encoder.backend)
             ),
             ocr_parser=registry.get("source", self.config.sources.ocr),
             scene_graph_parser=registry.get(
@@ -146,6 +148,15 @@ class PipelineRunner:
             num_node_classes=max(1, int(manifest["num_obj_classes"])),
             num_edge_classes=max(1, int(manifest["num_edge_classes"])),
         )
+        # Засев до создания модели: инициализация весов тянет из глобального
+        # генератора, и без этого два запуска одной конфигурации расходились
+        # на 7.5 пункта Recall@5 — больше, чем измеряемые эффекты.
+        from tgseqloc.training.trainer import seed_everything
+
+        seed_everything(
+            int(self.config.runtime.seed),
+            deterministic=bool(self.config.runtime.deterministic),
+        )
         model = registry.create(
             "graph_encoder", self.config.model.graph_encoder, **model_args
         )
@@ -175,6 +186,32 @@ class PipelineRunner:
         trainer = self.trainer()
         metrics, _ = trainer.evaluate_test(checkpoint, write_results=True)
         return metrics
+
+    def transfer(self, checkpoint: str | Path) -> dict[str, Any]:
+        """Evaluate a checkpoint trained on other data on this test protocol.
+
+        Results go where this configuration's own run would write them.
+        """
+
+        from tgseqloc.training.trainer import seed_everything
+        from tgseqloc.training.transfer import evaluate_transfer
+
+        manifest, split = self._prepared_metadata()
+        seed_everything(
+            int(self.config.runtime.seed),
+            deterministic=bool(self.config.runtime.deterministic),
+        )
+        run_dir = Path(self.config.output.root).expanduser() / self.config.output.experiment_name
+        return evaluate_transfer(
+            asdict(self.config),
+            self.prepared_data_root,
+            manifest,
+            split,
+            checkpoint,
+            run_dir=run_dir if run_dir.is_absolute() else Path.cwd() / run_dir,
+            retriever_factory=registry.get("retriever", self.config.retrieval.retriever),
+            metric_factory=registry.get("metric", self.config.retrieval.metric),
+        )
 
     def run(self, **prepare_kwargs: Any) -> dict[str, Any]:
         """Run prepare, train, and final evaluation as one reproducible job."""

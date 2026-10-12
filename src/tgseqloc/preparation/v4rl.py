@@ -12,6 +12,8 @@ from typing import Any, Callable, Mapping
 
 import torch
 
+from tgseqloc.data.formats import FrameText, replace_frame_texts
+from tgseqloc.data.identity import source_file_identity
 from tgseqloc.data.schema import (
     EDGE_FEATURE_DIM,
     NODE_FEATURE_DIM,
@@ -23,8 +25,12 @@ from tgseqloc.data.v4rl import (
     DEFAULT_NOOP_TEXTS,
     build_gt_mapping,
     build_positive_intervals,
+    build_block_split,
     build_temporal_split,
+    separate_by_ground_truth,
     build_vocabularies,
+    load_vocabularies,
+    DEFAULT_OCR_FILE_NAME,
     discover_v4rl_records,
     parse_paddleocr,
     parse_scene_graph,
@@ -32,7 +38,6 @@ from tgseqloc.data.v4rl import (
 )
 from tgseqloc.preparation.fusion import build_fused_graph
 from tgseqloc.preparation.text import (
-    DEFAULT_TEXT_ENCODER,
     FrozenTextEncoder,
     TextEncoder,
     validate_embeddings,
@@ -62,6 +67,27 @@ def _normalize_config(config: Any) -> Any:
         "dataset_root": _get(dataset, "root"),
         "sequences": _get(dataset, "sequences", ("seq1", "seq2")),
         "ocr_root_template": _get(dataset, "ocr_root_template"),
+        "ocr_file_name": _get(dataset, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
+        "traversals": _get(dataset, "traversals"),
+        "ins_path_template": _get(dataset, "ins_path_template"),
+        "poses_path_template": _get(dataset, "poses_path_template", ""),
+        "image_path_template": _get(dataset, "image_path_template"),
+        "frame_list_path": _get(dataset, "frame_list_path"),
+        "split_guard": _get(dataset, "split_guard", ""),
+        "validation_centres": list(_get(dataset, "validation_centres", []) or []),
+        "cameras": _get(dataset, "cameras"),
+        "primary_camera": _get(dataset, "primary_camera", "stereo_centre"),
+        "camera_fold_max_gap_s": _get(dataset, "camera_fold_max_gap_s", 0.3),
+        "split_folds_path": _get(dataset, "split_folds_path", ""),
+        "split_fold": int(_get(dataset, "split_fold", -1)),
+        # Белый список: ключ, которого тут нет, до адаптера не доедет
+        # молча, со значением по умолчанию.
+        "split_fold_count": int(_get(dataset, "split_fold_count", 0) or 0),
+        "gt_dimensions": int(_get(dataset, "gt_dimensions", 0) or 0),
+        "gt_radius_m": _get(dataset, "gt_radius_m", 25.0),
+        "dynamic_node_classes": tuple(_get(preprocess, "dynamic_node_classes", ()) or ()),
+        "vocabulary_manifest": _get(preprocess, "vocabulary_manifest", ""),
+        "symmetric_scene_edges": bool(_get(preprocess, "symmetric_scene_edges", False)),
         "scene_graph_root_template": _get(dataset, "scene_graph_root_template"),
         "gt_path": _get(dataset, "gt_path"),
         "output_root": _get(dataset, "prepared_root"),
@@ -75,22 +101,60 @@ def _normalize_config(config: Any) -> Any:
         "source_scene_graph_backend": _get(
             _get(config, "sources"), "scene_graph", "external_json"
         ),
-        "text_encoder": _get(preprocess, "text_encoder", DEFAULT_TEXT_ENCODER),
-        "text_encoder_backend": _get(
-            preprocess, "text_encoder_backend", "multilingual_e5"
-        ),
-        "text_encoder_revision": _get(preprocess, "revision"),
+        # The encoder is configured as backend + params; the flat keys below
+        # are what the fingerprint has always hashed, so they keep their names.
+        # A lexical encoder has no model name, and claiming it uses the default
+        # one would put a false model into the manifest.
+        "text_encoder": _encoder_params(preprocess).get("model_name"),
+        "text_encoder_backend": _encoder_backend(preprocess),
+        "text_encoder_revision": _encoder_params(preprocess).get("revision"),
+        "text_encoder_params": _encoder_params(preprocess),
         "text_filter_backend": _get(preprocess, "text_filter", "confidence"),
         "fusion_backend": _get(preprocess, "fusion", "text_nodes"),
+        "use_text_nodes": bool(_get(preprocess, "use_text_nodes", True)),
+        "shuffle_text_seed": _get(preprocess, "shuffle_text_seed"),
+        "text_correction": _component_identity(_get(preprocess, "text_correction")),
         "connection_strategy": _get(preprocess, "connection_strategy", "overlap_nearest"),
         "connection_k": _get(preprocess, "connection_k", 1),
         "ocr_confidence_threshold": _get(preprocess, "ocr_confidence_threshold", 0.0),
+        "text_min_length": int(_get(preprocess, "text_min_length", 0) or 0),
+        "text_drop_numeric": bool(_get(preprocess, "text_drop_numeric", False)),
         "encoder_batch_size": _get(preprocess, "encoder_batch_size", 128),
         "frame_batch_size": _get(preprocess, "frame_batch_size", 256),
         "gt_tolerance_ns": _get(preprocess, "gt_tolerance_ns", 50_000_000),
+        "ocr_stage": _component_identity(_get(config, "ocr")),
+        "segmentation_stage": _component_identity(_get(config, "segmentation")),
+        "text_dynamics": _component_identity(_get(config, "text_dynamics")),
+        "prepared_root": _get(dataset, "prepared_root"),
         "cache_policy": _get(config, "cache_policy", _get(cache, "policy")),
         "device": device,
     }
+
+
+def _component_identity(component: Any) -> dict[str, Any] | None:
+    """Backend and params of a switchable stage, or None when it is disabled."""
+
+    if component is None:
+        return None
+    backend = _get(component, "backend")
+    if not backend:
+        return None
+    return {"backend": str(backend), "params": dict(_get(component, "params", {}) or {})}
+
+
+def _encoder_backend(preprocess: Any) -> str:
+    """Name of the selected encoder, tolerating a plain mapping in tests."""
+
+    encoder = _get(preprocess, "text_encoder")
+    return str(_get(encoder, "backend", "multilingual_e5") or "multilingual_e5")
+
+
+def _encoder_params(preprocess: Any) -> dict[str, Any]:
+    """Parameters the selected encoder's factory should receive."""
+
+    encoder = _get(preprocess, "text_encoder")
+    params = _get(encoder, "params", {}) or {}
+    return dict(params)
 
 
 def build_preprocess_fingerprint(
@@ -109,37 +173,50 @@ def build_preprocess_fingerprint(
         "dataset": _get(config, "dataset", "v4rl"),
         "sequences": list(_get(config, "sequences", ("seq1", "seq2"))),
         "chunk_size": int(_get(config, "chunk_size", 200)),
-        "text_encoder": _get(config, "text_encoder", DEFAULT_TEXT_ENCODER),
+        # Recorded even though each frame's sidecar is hashed by content: the
+        # manifest should say which recognizer produced the graphs.
+        "ocr_file_name": _get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME),
+        "traversals": _get(config, "traversals"),
+        "gt_radius_m": _get(config, "gt_radius_m"),
+        "dynamic_node_classes": sorted(_get(config, "dynamic_node_classes", ()) or ()),
+        "symmetric_scene_edges": bool(_get(config, "symmetric_scene_edges", False)),
+        "text_encoder": _get(config, "text_encoder"),
         "text_encoder_revision": _get(config, "text_encoder_revision"),
         "text_embedding_dim": int(text_embedding_dim),
         "connection_strategy": _get(config, "connection_strategy", "overlap_nearest"),
         "connection_k": int(_get(config, "connection_k", 1)),
+        "use_text_nodes": bool(_get(config, "use_text_nodes", True)),
+        "shuffle_text_seed": _get(config, "shuffle_text_seed"),
+        "text_correction": _get(config, "text_correction"),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "ocr_noop_texts": sorted(_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS)),
+        "ocr_stage": _get(config, "ocr_stage"),
+        "segmentation_stage": _get(config, "segmentation_stage"),
+        "text_dynamics": _get(config, "text_dynamics"),
         "node_class_to_idx": dict(class_to_idx),
         "edge_label_to_idx": dict(edge_label_to_idx),
         "backend_identities": backend_identities,
         "source_identities": source_identities,
     }
+    if _get(config, "cameras"):
+        # Only when set, so single-camera preparations keep their fingerprint.
+        payload["cameras"] = _get(config, "cameras")
+        payload["primary_camera"] = _get(config, "primary_camera", "stereo_centre")
+    min_length = int(_get(config, "text_min_length", 0) or 0)
+    drop_numeric = bool(_get(config, "text_drop_numeric", False))
+    if min_length > 0 or drop_numeric:
+        # Recorded only when enabled, so data prepared without the filter
+        # keeps its fingerprint.
+        payload["text_junk_filter"] = {"min_length": min_length, "drop_numeric": drop_numeric}
+    frame_list_path = _get(config, "frame_list_path")
+    if frame_list_path:
+        # Recorded only when set, so the fingerprint of a dataset that uses
+        # every frame stays what it was.
+        payload["frame_list"] = hashlib.sha256(Path(frame_list_path).read_bytes()).hexdigest()
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
-def source_file_identity(path: str | Path) -> dict[str, Any]:
-    """Return a reproducible path/stat/content identity for one source file."""
-
-    source = Path(path)
-    stat = source.stat()
-    digest = hashlib.sha256()
-    with source.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return {
-        "path": str(source.resolve()),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "sha256": digest.hexdigest(),
-    }
 
 
 def _stable_value(value: Any) -> Any:
@@ -257,7 +334,7 @@ def backend_identities(
             "text_filter": _get(config, "text_filter_backend", "confidence"),
             "fusion": _get(config, "fusion_backend", "text_nodes"),
             "encoder": _get(config, "text_encoder_backend", "multilingual_e5"),
-            "encoder_model": _get(config, "text_encoder", DEFAULT_TEXT_ENCODER),
+            "encoder_model": _get(config, "text_encoder"),
         },
         "implementations": {
             "ocr_parser": callable_identity(ocr_parser),
@@ -299,7 +376,14 @@ def build_source_identities(
                 "index": record.index,
                 "stem": record.stem,
                 "image": source_file_identity(record.image_path),
-                "ocr": source_file_identity(record.ocr_path),
+                # Отсутствует, когда OCR считает сама стадия: её идентичность
+                # обеспечивают кэш стадии и ocr_stage в фингерпринте, а
+                # discovery уже потребовала бы файл, если бы он был нужен.
+                "ocr": (
+                    source_file_identity(record.ocr_path)
+                    if Path(record.ocr_path).is_file()
+                    else None
+                ),
                 "scene_graph": source_file_identity(record.graph_path),
             }
             for record in records
@@ -353,6 +437,164 @@ def is_compatible_output(
         return False
 
 
+def _frame_text(
+    config: Any,
+    record: FrameRecord,
+    ocr_parser: Callable[..., FrameText],
+    text_filter: Callable[..., bool] | None,
+) -> FrameText:
+    """Recognized text for one frame, from the cached stage or the parser.
+
+    Debris is removed here, in the one place every path goes through, so a
+    parsed sidecar, a stage artifact and the shuffled control's pool all see
+    the same strings.
+    """
+
+    stage = _get(config, "ocr_stage")
+    if stage is None:
+        frame_text = ocr_parser(
+            record.ocr_path,
+            float(_get(config, "ocr_confidence_threshold", 0.0)),
+            noop_texts=_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS),
+            prediction_filter=text_filter,
+        )
+        return _drop_junk_text(config, frame_text)
+    from tgseqloc.stages import read_stage, stage_root
+
+    root = stage_root(
+        _get(config, "prepared_root"), _get(config, "dataset", "v4rl"), "ocr"
+    )
+    return _drop_junk_text(config, read_stage("ocr", root, record.sequence, record.stem))
+
+
+def _drop_junk_text(config: Any, frame_text: FrameText) -> FrameText:
+    """Remove recognition debris that cannot identify a place.
+
+    Strings shorter than ``text_min_length`` and, with ``text_drop_numeric``,
+    strings of digits alone are dropped. On Oxford RobotCar the most frequent
+    strings left after dynamic filtering were single characters -- ``1`` on 36
+    of 108 route segments, ``-`` on 32, ``0`` on 29. Every occurrence encodes to
+    the same vector, so each pulled a query towards any frame carrying the same
+    debris: queries with text fell to R@5 9.6 against 55.7 without it, and
+    real text scored no better than shuffled text.
+
+    The rule is the one the text-density analysis applied to every dataset from
+    the start, moved into the pipeline. The recognizer's confidence is left out
+    on purpose: recognizers report it on different scales and one reports none,
+    so a shared threshold would bias any comparison between them.
+    """
+
+    min_length = int(_get(config, "text_min_length", 0) or 0)
+    drop_numeric = bool(_get(config, "text_drop_numeric", False))
+    if (min_length <= 0 and not drop_numeric) or not frame_text.detections:
+        return frame_text
+    keep = []
+    for detection in frame_text.detections:
+        value = detection.text.strip()
+        keep.append(not (len(value) < min_length or (drop_numeric and value.isdigit())))
+    return frame_text.select(keep)
+
+
+def _drop_dynamic_text(
+    config: Any, record: FrameRecord, frame_text: FrameText
+) -> FrameText:
+    """Remove text sitting on ephemeral objects, if the stage is configured.
+
+    Text on a bus travels with the bus, so keeping it invites the model to
+    match places by a vehicle that drove through both.
+    """
+
+    dynamics = _get(config, "text_dynamics")
+    if dynamics is None or not frame_text.detections:
+        return frame_text
+    from tgseqloc.registry import registry
+    from tgseqloc.stages import read_stage, stage_root
+
+    masks = read_stage(
+        "segmentation",
+        stage_root(
+            _get(config, "prepared_root"),
+            _get(config, "dataset", "v4rl"),
+            "segmentation",
+        ),
+        record.sequence,
+        record.stem,
+    )
+    node = registry.create("text_dynamics", dynamics["backend"], **dynamics["params"])
+    return node.apply(frame_text, masks)
+
+
+def _build_corrector(
+    config: Any,
+    records: list[FrameRecord],
+    ocr_parser: Callable[..., FrameText],
+    text_filter: Callable[..., bool] | None,
+) -> Any:
+    """Create the configured corrector, seeded with the dataset's own strings.
+
+    A general dictionary holds neither PECLARD nor BOUCHERIE, and correcting
+    them toward common words would remove precisely what identifies the place.
+    The vocabulary therefore comes from what the recognizer actually produced.
+    """
+
+    settings = _get(config, "text_correction")
+    if not settings:
+        return None
+    from tgseqloc.registry import registry
+
+    texts: list[str] = []
+    for record in records:
+        frame_text = _drop_dynamic_text(
+            config, record, _frame_text(config, record, ocr_parser, text_filter)
+        )
+        texts.extend(frame_text.texts)
+    return registry.create(
+        "text_correction", settings["backend"], texts, **settings["params"]
+    )
+
+
+def _shuffled_text_pool(
+    config: Any,
+    records: list[FrameRecord],
+    ocr_parser: Callable[..., FrameText],
+    text_filter: Callable[..., bool] | None,
+    seed: int,
+) -> dict[tuple[str, int], list[str]]:
+    """Permute recognized strings across the whole dataset.
+
+    The permutation has to be global. Preparation runs in batches of adjacent
+    frames, and adjacent frames look at the same shopfronts, so shuffling
+    inside a batch would leave the text almost where it was and the control
+    would prove nothing.
+
+    Box count per frame is preserved, so every graph keeps its nodes and edges
+    and only the strings move.
+    """
+
+    per_frame: list[tuple[tuple[str, int], list[str]]] = []
+    pool: list[str] = []
+    for record in records:
+        frame_text = _drop_dynamic_text(
+            config, record, _frame_text(config, record, ocr_parser, text_filter)
+        )
+        texts = frame_text.texts
+        per_frame.append(((record.sequence, record.index), texts))
+        pool.extend(texts)
+
+    import random
+
+    order = list(range(len(pool)))
+    random.Random(seed).shuffle(order)
+    permuted = [pool[position] for position in order]
+
+    result: dict[tuple[str, int], list[str]] = {}
+    cursor = 0
+    for key, texts in per_frame:
+        result[key] = permuted[cursor: cursor + len(texts)]
+        cursor += len(texts)
+    return result
+
+
 def _make_encoder(
     config: Any,
     encoder: TextEncoder | None,
@@ -360,11 +602,12 @@ def _make_encoder(
 ) -> TextEncoder:
     if encoder is not None:
         return encoder
+    # Only device and batch size are common to every encoder; everything else
+    # is the chosen backend's own vocabulary and is passed through untouched.
     return factory(
-        model_name=_get(config, "text_encoder", DEFAULT_TEXT_ENCODER),
-        revision=_get(config, "text_encoder_revision"),
         device=_get(config, "device", "cpu"),
         batch_size=int(_get(config, "encoder_batch_size", 128)),
+        **dict(_get(config, "text_encoder_params", {}) or {}),
     )
 
 
@@ -381,26 +624,97 @@ def _graph_value(graph: Any, key: str, default: Any = None) -> Any:
     return getattr(graph, key, default)
 
 
+
+SUPPORTED_DATASETS = frozenset({"v4rl", "robotcar", "pervomay"})
+
+
+def write_v4rl_split(
+    config: Any, records: list[FrameRecord], mappings_root: Path
+) -> tuple[dict[str, Any], Any]:
+    """V4RL ground truth: a correspondence file plus a split by time ratio.
+
+    Returns the split and the parsed correspondence file, the latter being what
+    defines a correct answer here and therefore part of the identity of any
+    checkpoint trained on it.
+    """
+
+    mapping = build_gt_mapping(
+        _get(config, "gt_path"), records,
+        int(_get(config, "gt_tolerance_ns", 50_000_000)),
+        reference_sequence=str(_get(config, "reference_sequence", "seq1")),
+        query_sequence=str(_get(config, "query_sequence", "seq2")),
+    )
+    save_json(mapping, mappings_root / "gt_shop_street_1.json")
+    query_sequence = mapping["query_sequence"]
+    query_records = [record for record in records if record.sequence == query_sequence]
+    positives = build_positive_intervals(
+        mapping, query_records, interpolate=bool(_get(config, "interpolate_gt", False))
+    )
+    guard = str(_get(config, "split_guard", "") or "")
+    if guard == "ground_truth_blocks":
+        split = build_block_split(
+            len(query_records), positives,
+            test_ratio=float(_get(config, "test_ratio", 0.2)),
+            validation_ratio=float(_get(config, "validation_ratio", 0.1)),
+            validation_centres=[float(c) for c in _get(config, "validation_centres", [])],
+        )
+    else:
+        split = build_temporal_split(
+            len(query_records), positives,
+            test_ratio=float(_get(config, "test_ratio", 0.2)),
+            validation_ratio=float(_get(config, "validation_ratio", 0.1)),
+            require_nonempty=False,
+        )
+        if guard == "ground_truth_overlap":
+            split = separate_by_ground_truth(split)
+    reference_sequence = mapping["reference_sequence"]
+    reference_records = [
+        record for record in records if record.sequence == reference_sequence
+    ]
+    split["database_paths"] = [
+        f"{record.sequence}/{record.stem}.pt" for record in reference_records
+    ]
+    split["query_paths"] = [
+        f"{record.sequence}/{record.stem}.pt" for record in query_records
+    ]
+    split["reference_sequence"] = reference_sequence
+    split["query_sequence"] = query_sequence
+    save_json(split, mappings_root / "temporal_split.json")
+    return split, mapping
+
+
 def process_v4rl(
     config: Any,
     *,
     encoder: TextEncoder | None = None,
     text_encoder_factory: Callable[..., TextEncoder] = FrozenTextEncoder,
-    ocr_parser: Callable[..., tuple[list[list[float]], list[str]]] = parse_paddleocr,
+    ocr_parser: Callable[..., FrameText] = parse_paddleocr,
     scene_graph_parser: Callable[..., tuple[list[dict[str, Any]], list[tuple[int, int, str]], int]] = parse_scene_graph,
     text_filter: Callable[[Mapping[str, Any], float], bool] | None = None,
     fusion_builder: Callable[..., Any] = build_fused_graph,
+    record_discovery: Callable[[Any], list[FrameRecord]] | None = None,
+    split_writer: Callable[[Any, list[FrameRecord], Path], tuple[dict[str, Any], Any]] | None = None,
 ) -> dict[str, Any]:
-    """Prepare all V4RL frames and return the written manifest.
+    """Prepare every frame of a dataset and return the written manifest.
 
     ``config`` may be a dataclass, argparse Namespace, or mapping. An injected
     encoder avoids Hugging Face downloads in tests and controlled pipelines.
+
+    Only two things differ between datasets: which frames exist, and how a
+    query's correct answers and the train/test division are decided.
+    ``record_discovery`` and ``split_writer`` are those seams and default to
+    V4RL. Everything between them -- reading text, dropping dynamic detections,
+    encoding, fusing and caching one graph per frame -- is the same work
+    whatever produced the frames, so it is not written twice.
     """
 
     config = _normalize_config(config)
     dataset = _get(config, "dataset", "v4rl")
-    if dataset != "v4rl":
-        raise ValueError(f"Unsupported dataset adapter: {dataset}")
+    if dataset not in SUPPORTED_DATASETS:
+        raise ValueError(
+            f"Unsupported dataset adapter: {dataset}; "
+            f"available: {', '.join(sorted(SUPPORTED_DATASETS))}"
+        )
     required = (
         "dataset_root", "ocr_root_template", "scene_graph_root_template",
         "gt_path", "output_root",
@@ -410,14 +724,35 @@ def process_v4rl(
         raise ValueError(f"Missing V4RL preparation settings: {', '.join(missing)}")
 
     sequences = tuple(_get(config, "sequences", ("seq1", "seq2")))
-    records = discover_v4rl_records(
-        _get(config, "dataset_root"),
-        str(_get(config, "ocr_root_template")),
-        str(_get(config, "scene_graph_root_template")),
-        sequences,
-        chunk_size=int(_get(config, "chunk_size", 200)),
+    if record_discovery is not None:
+        records = record_discovery(config)
+    else:
+        records = discover_v4rl_records(
+            _get(config, "dataset_root"),
+            str(_get(config, "ocr_root_template")),
+            str(_get(config, "scene_graph_root_template")),
+            sequences,
+            chunk_size=int(_get(config, "chunk_size", 200)),
+            require_ocr=_get(config, "ocr_stage") is None,
+            ocr_file_name=str(_get(config, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
+        )
+    if not records:
+        raise RuntimeError("Frame discovery produced no records")
+    corrector = _build_corrector(config, records, ocr_parser, text_filter)
+    shuffle_seed = _get(config, "shuffle_text_seed")
+    shuffled_texts = (
+        _shuffled_text_pool(config, records, ocr_parser, text_filter, int(shuffle_seed))
+        if shuffle_seed is not None
+        else None
     )
-    class_to_idx, edge_label_to_idx = build_vocabularies(records)
+    dynamic_node_classes = tuple(_get(config, "dynamic_node_classes", ()) or ())
+    vocabulary_manifest = _get(config, "vocabulary_manifest")
+    if vocabulary_manifest:
+        # A model reads class ids by position: evaluating one trained on another
+        # dataset needs that dataset's vocabulary, not one built from these graphs.
+        class_to_idx, edge_label_to_idx = load_vocabularies(vocabulary_manifest)
+    else:
+        class_to_idx, edge_label_to_idx = build_vocabularies(records, dynamic_node_classes)
     source_identities = build_source_identities(records, _get(config, "gt_path"))
     for backend, implementation in {
         "OCR source": ocr_parser,
@@ -517,18 +852,28 @@ def process_v4rl(
                 skipped += 1
                 continue
             object_nodes, scene_edges, dropped = scene_graph_parser(
-                record.graph_path, class_to_idx
+                record.graph_path, class_to_idx, dynamic_node_classes
             )
-            boxes, texts = ocr_parser(
-                record.ocr_path,
-                float(_get(config, "ocr_confidence_threshold", 0.0)),
-                noop_texts=_get(config, "ocr_noop_texts", DEFAULT_NOOP_TEXTS),
-                prediction_filter=text_filter,
-            )
+            frame_text = _frame_text(config, record, ocr_parser, text_filter)
+            frame_text = _drop_dynamic_text(config, record, frame_text)
+            if corrector is not None and len(frame_text):
+                frame_text = replace_frame_texts(
+                    frame_text, corrector.correct_all(frame_text.texts)
+                )
+            if shuffled_texts is not None:
+                replacement = shuffled_texts[(record.sequence, record.index)]
+                frame_text = replace_frame_texts(frame_text, replacement)
+            if not _get(config, "use_text_nodes", True):
+                # The "no text" ablation arm: only object nodes remain.
+                frame_text = frame_text.select([False] * len(frame_text))
+            texts = frame_text.texts
             text_start = len(flat_texts)
             flat_texts.extend(texts)
             pending.append(
-                (record, output_path, object_nodes, scene_edges, dropped, boxes, texts, text_start)
+                (
+                    record, output_path, object_nodes, scene_edges, dropped,
+                    frame_text.boxes, texts, text_start,
+                )
             )
         encoded = validate_embeddings(
             text_encoder, flat_texts, text_encoder.encode(flat_texts)
@@ -564,43 +909,17 @@ def process_v4rl(
                 connection_strategy=_get(config, "connection_strategy", "overlap_nearest"),
                 connection_k=int(_get(config, "connection_k", 1)),
                 metadata=metadata,
+                symmetric_scene_edges=bool(
+                    _get(config, "symmetric_scene_edges", False)
+                ),
             )
             _atomic_torch_save(graph, output_path)
             written += 1
             dropped_this_run += dropped
 
-    mapping = build_gt_mapping(
-        _get(config, "gt_path"), records,
-        int(_get(config, "gt_tolerance_ns", 50_000_000)),
-        reference_sequence=str(_get(config, "reference_sequence", "seq1")),
-        query_sequence=str(_get(config, "query_sequence", "seq2")),
-    )
     mappings_root = output_root / "mappings"
-    save_json(mapping, mappings_root / "gt_shop_street_1.json")
-    query_sequence = mapping["query_sequence"]
-    query_records = [record for record in records if record.sequence == query_sequence]
-    positives = build_positive_intervals(
-        mapping, query_records, interpolate=bool(_get(config, "interpolate_gt", False))
-    )
-    split = build_temporal_split(
-        len(query_records), positives,
-        test_ratio=float(_get(config, "test_ratio", 0.2)),
-        validation_ratio=float(_get(config, "validation_ratio", 0.1)),
-        require_nonempty=False,
-    )
-    reference_sequence = mapping["reference_sequence"]
-    reference_records = [
-        record for record in records if record.sequence == reference_sequence
-    ]
-    split["database_paths"] = [
-        f"{record.sequence}/{record.stem}.pt" for record in reference_records
-    ]
-    split["query_paths"] = [
-        f"{record.sequence}/{record.stem}.pt" for record in query_records
-    ]
-    split["reference_sequence"] = reference_sequence
-    split["query_sequence"] = query_sequence
-    save_json(split, mappings_root / "temporal_split.json")
+    writer = split_writer if split_writer is not None else write_v4rl_split
+    split, ground_truth_descriptor = writer(config, records, mappings_root)
 
     expected_graphs = []
     compatible_count = 0
@@ -652,7 +971,7 @@ def process_v4rl(
                 entry["path"]: entry["sha256"] for entry in expected_graphs
             },
             "ground_truth": source_identities["ground_truth"],
-            "mapping": mapping,
+            "mapping": ground_truth_descriptor,
             "temporal_split": split,
         }
     )
@@ -685,18 +1004,25 @@ def process_v4rl(
         "text_embedding_dim": embedding_dim,
         "connection_strategy": _get(config, "connection_strategy", "overlap_nearest"),
         "connection_k": int(_get(config, "connection_k", 1)),
+        "use_text_nodes": bool(_get(config, "use_text_nodes", True)),
+        "shuffle_text_seed": _get(config, "shuffle_text_seed"),
+        "text_correction": _get(config, "text_correction"),
         "ocr_confidence_threshold": float(_get(config, "ocr_confidence_threshold", 0.0)),
         "node_class_to_idx": class_to_idx,
         "edge_label_to_idx": edge_label_to_idx,
         "num_obj_classes": len(class_to_idx),
         "num_edge_classes": len(edge_label_to_idx),
-        "uses_text_nodes": True,
+        "uses_text_nodes": bool(_get(config, "use_text_nodes", True)),
         "node_feature_dim": NODE_FEATURE_DIM,
         "edge_attr_dim": EDGE_FEATURE_DIM,
         "graph_rotated": False,
         "dropped_scene_edge_count_this_run": dropped_this_run,
         "dropped_scene_edge_count": total_dropped,
-        "mapping_path": "mappings/gt_shop_street_1.json",
+        "mapping_path": (
+            "mappings/gt_shop_street_1.json"
+            if (mappings_root / "gt_shop_street_1.json").is_file()
+            else None
+        ),
         "temporal_split_path": "mappings/temporal_split.json",
         "output_layout": "{dataset}/{sequence}/{frame_stem}.pt",
     }
@@ -704,4 +1030,49 @@ def process_v4rl(
     return manifest
 
 
+def discover_v4rl_inputs(config: Any) -> int:
+    """Check that every precomputed input exists and count the frames.
+
+    Attached to the adapter below so that the orchestrator can verify inputs
+    without knowing how V4RL is laid out on disk.
+    """
+
+    settings = _normalize_config(config)
+    records = discover_v4rl_records(
+        _get(settings, "dataset_root"),
+        _get(settings, "ocr_root_template"),
+        _get(settings, "scene_graph_root_template"),
+        _get(settings, "sequences", ("seq1", "seq2")),
+        chunk_size=int(_get(settings, "chunk_size", 200)),
+        require_ocr=_get(settings, "ocr_stage") is None,
+        ocr_file_name=str(_get(settings, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
+    )
+    gt_path = Path(_get(settings, "gt_path"))
+    if not gt_path.is_file():
+        raise FileNotFoundError(f"Missing V4RL ground truth: {gt_path}")
+    return len(records)
+
+
+def discover_v4rl_frames(config: Any) -> list[tuple[str, str, Path]]:
+    """Frames as (sequence, stem, image path) for the model stages.
+
+    Stages need only the images; OCR and scene-graph sidecars may legitimately
+    not exist yet when the pipeline computes them itself.
+    """
+
+    settings = _normalize_config(config)
+    records = discover_v4rl_records(
+        _get(settings, "dataset_root"),
+        _get(settings, "ocr_root_template"),
+        _get(settings, "scene_graph_root_template"),
+        _get(settings, "sequences", ("seq1", "seq2")),
+        chunk_size=int(_get(settings, "chunk_size", 200)),
+        require_inputs=False,
+        ocr_file_name=str(_get(settings, "ocr_file_name", DEFAULT_OCR_FILE_NAME)),
+    )
+    return [(r.sequence, r.stem, r.image_path) for r in records]
+
+
+process_v4rl.discover_inputs = discover_v4rl_inputs
+process_v4rl.discover_frames = discover_v4rl_frames
 process_dataset = process_v4rl

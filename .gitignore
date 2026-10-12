@@ -5,3 +5,18 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+
+# Веса скачиваются по манифесту, в git не хранятся.
+weights/**
+!weights/manifest.yaml
+
+# Обучение пишет сюда чекпоинты — гигабайты, воспроизводимо из конфига.
+outputs/
+
+# Конфиги на сид/значение, которые генерируют скрипты экспериментов.
+configs/c10_*.yaml
+configs/enc_*.yaml
+configs/ctl_*.yaml
+configs/scan_*.yaml
+configs/v4rl_det*.yaml
+configs/v4rl_timing.yaml
